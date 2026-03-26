@@ -1,0 +1,27 @@
+{
+  "name": "ts-openai-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.tsx",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "dependencies": {
+    "@types/react": "^19.2.14",
+    "dotenv": "^16.6.1",
+    "ink": "^6.8.0",
+    "ink-text-input": "^6.0.0",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
+    "openai": "^5.19.1",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

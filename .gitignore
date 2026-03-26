@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage
+coverage/
+
+# Editor/OS files
+.DS_Store
+.vscode/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.tasks
+*.transcripts
