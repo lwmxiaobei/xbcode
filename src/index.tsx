@@ -3,20 +3,23 @@
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
 
 import { config as loadDotenv } from "dotenv";
 import fs from "node:fs";
-import { Box, Newline, Text, render, useApp, useInput } from "ink";
+import { Box, Newline, Text, render, useApp, useInput, useStdin } from "ink";
 import TextInput from "ink-text-input";
 import { Marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import OpenAI from "openai";
 import { useEffect, useRef, useState } from "react";
+import wrapAnsi from "wrap-ansi";
 
-import { runAgentTurn, type AgentConfig } from "./agent.js";
+import { isTurnInterruptedError, runAgentTurn, type AgentConfig } from "./agent.js";
 import { resolveConfig, getProviderNames, getProviderModels, loadSettings, reloadSettings, getSettingsPath, normalizeModelEntry, type ResolvedConfig } from "./config.js";
 import { estimateTokens, autoCompact } from "./compact.js";
-import { skillLoader } from "./tools.js";
+import { formatMailboxMessages, renderInboxPrompt } from "./message-bus.js";
+import { skillLoader, messageBus, teammateManager } from "./tools.js";
 import type { AgentState, DiffLine, UiBridge, UiMessage } from "./types.js";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -94,9 +97,16 @@ function needsModelSelection(): boolean {
   return true;
 }
 
-type MessageViewProps = Readonly<{ message: UiMessage }>;
 type TrustPromptProps = Readonly<{ selectedIndex: number }>;
 type StringRef = { current: string | undefined };
+type ViewportRow = {
+  id: string;
+  prefix: string;
+  prefixColor?: string;
+  text: string;
+  color?: string;
+  dimColor?: boolean;
+};
 type SlashCommand = {
   command: string;
   description: string;
@@ -105,6 +115,8 @@ type SlashCommand = {
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/help", description: "show available commands" },
   { command: "/status", description: "show session status" },
+  { command: "/team", description: "show teammate statuses" },
+  { command: "/inbox", description: "drain lead inbox" },
   { command: "/provider", description: "switch provider" },
   { command: "/model", description: "switch model within current provider" },
   { command: "/compact", description: "compact conversation history to free context space" },
@@ -112,6 +124,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/exit", description: "exit the CLI" },
 ];
 
+const MOUSE_INPUT_SEQUENCE_RE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 
 function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -136,6 +149,20 @@ function stripAnsi(text: string): string {
 
 function toolPreview(value: string, maxLength = 400): string {
   return ellipsize(value.replaceAll(/\s+/g, " ").trim(), maxLength);
+}
+
+function parseMouseInputSequence(input: string): { kind: "wheel"; delta: number } | { kind: "other" } | null {
+  const match = MOUSE_INPUT_SEQUENCE_RE.exec(input);
+  if (!match) {
+    return null;
+  }
+
+  const code = Number(match[1]);
+  if ((code & 64) === 64) {
+    return { kind: "wheel", delta: (code & 1) === 0 ? 3 : -3 };
+  }
+
+  return { kind: "other" };
 }
 
 type ToolDisplay = {
@@ -277,12 +304,21 @@ function renderMarkdown(text: string): string {
   return rendered.trimEnd();
 }
 
-function estimateWrappedLineCount(text: string, width: number): number {
+function wrapTextToRows(text: string, width: number): string[] {
   const safeWidth = Math.max(1, width);
-  return text.split("\n").reduce((total, line) => {
-    const length = Math.max(1, stripAnsi(line).length);
-    return total + Math.max(1, Math.ceil(length / safeWidth));
-  }, 0);
+  const logicalLines = text.split("\n");
+  const rows: string[] = [];
+
+  for (const logicalLine of logicalLines) {
+    const wrapped = wrapAnsi(logicalLine.length > 0 ? logicalLine : " ", safeWidth, {
+      hard: true,
+      trim: false,
+      wordWrap: false,
+    }).split("\n");
+    rows.push(...(wrapped.length > 0 ? wrapped : [" "]));
+  }
+
+  return rows.length > 0 ? rows : [" "];
 }
 
 function getMessageMarker(kind: UiMessage["kind"]): { symbol: string; color: string } | undefined {
@@ -294,43 +330,6 @@ function getMessageMarker(kind: UiMessage["kind"]): { symbol: string; color: str
     default:
       return undefined;
   }
-}
-
-function estimateMessageHeight(message: UiMessage, width: number): number {
-  // Collapsed thinking is always 1 line + margin
-  if (message.kind === "thinking" && message.collapsed) {
-    return 2;
-  }
-
-  const contentWidth = Math.max(1, width - 3);
-  let height = estimateWrappedLineCount(message.text || " ", contentWidth);
-
-  if (message.title) {
-    height += estimateWrappedLineCount(`[${message.title}]`, contentWidth);
-  }
-
-  return height + 1;
-}
-
-function selectVisibleMessages(messages: UiMessage[], availableLines: number, width: number): UiMessage[] {
-  if (availableLines <= 0) {
-    return [];
-  }
-
-  let consumed = 0;
-  const selected: UiMessage[] = [];
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const next = messages[index];
-    const height = estimateMessageHeight(next, width);
-    if (selected.length > 0 && consumed + height > availableLines) {
-      break;
-    }
-    selected.unshift(next);
-    consumed += height;
-  }
-
-  return selected;
 }
 
 function borderRule(width: number): string {
@@ -388,7 +387,7 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
       paddingY={0}
     >
       <Box justifyContent="space-between">
-        <Text bold color="red">Claude Code</Text>
+        <Text bold color="red">Claude Code Mini</Text>
         <Text color="gray">v2.1.80</Text>
       </Box>
       <Box marginTop={1}>
@@ -415,13 +414,14 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
   );
 }
 
-function StatusBar({ width, busy, state }: { width: number; busy: boolean; state: AgentState }) {
+function StatusBar({ width, busy, state, scrollOffset }: { width: number; busy: boolean; state: AgentState; scrollOffset: number }) {
   const left = currentResolved
     ? `[${currentResolved.providerName}] ${currentResolved.model}`
     : "[no-model]";
   const mid = `${state.turnCount} turns`;
-  const right = busy ? "working" : `~${estimateTokens(state.chatHistory)} tok`;
-  const text = `${left} | ${mid} | ${right}`;
+  const right = busy ? "working · Esc to stop" : `~${estimateTokens(state.chatHistory)} token`;
+  const history = scrollOffset > 0 ? ` | history ↑${scrollOffset}` : "";
+  const text = `${left} | ${mid} | ${right}${history}`;
 
   return (
     <Text color="gray" wrap="truncate">
@@ -436,14 +436,19 @@ function helpMessage(): string {
   return [
     "help                show available commands",
     "status              show session status",
+    "team                show teammate statuses",
+    "inbox               drain lead inbox",
     "provider [name]     switch provider (no arg = list providers)",
     "model [name]        switch model within current provider",
+    "compact             compact conversation history to free context space",
     "new                 clear context and start a new conversation",
     "exit                exit the CLI",
     "",
     `config     ${getSettingsPath()}`,
     `providers  ${providerList}`,
     "",
+    "Press Esc while working to stop the current turn without clearing session context.",
+    "Use PgUp/PgDn/Home/End to browse message history.",
     "Slash variants also work, for example /help and /exit.",
     "Anything else is sent directly to the model.",
   ].join("\n");
@@ -462,8 +467,13 @@ function sessionStatus(state: AgentState): string {
     `baseURL  ${currentResolved.baseURL}`,
     `turns    ${state.turnCount}`,
     `context  ~${estimateTokens(state.chatHistory)} tokens | compacted: ${state.compactCount} times`,
+    `team     ${teammateManager.listMembers().length} teammates | lead inbox: ${messageBus.inboxSize("lead")}`,
     `uptime   ${formatDuration(Date.now() - state.launchedAt)}`,
   ].filter(Boolean).join("\n");
+}
+
+function buildLeadInboxQuery(inboxPrompt: string, userQuery: string): string {
+  return `${inboxPrompt}\n\n<user_request>\n${userQuery}\n</user_request>`;
 }
 
 function findSlashCommandMatches(inputValue: string): SlashCommand[] {
@@ -493,6 +503,8 @@ function normalizeCommand(inputValue: string): string | null {
   switch (cmd) {
     case "help":
     case "status":
+    case "team":
+    case "inbox":
     case "compact":
     case "new":
     case "exit":
@@ -507,58 +519,115 @@ function normalizeCommand(inputValue: string): string | null {
   }
 }
 
-function MessageView({ message }: MessageViewProps) {
+function buildMessageRows(message: UiMessage, width: number): ViewportRow[] {
   const { titleColor, bodyColor } = getMessagePalette(message.kind);
   const marker = getMessageMarker(message.kind);
+  const contentWidth = Math.max(1, width - 2);
+  const rows: Array<{ text: string; color?: string; dimColor?: boolean }> = [];
+  const appendRows = (text: string, color?: string, dimColor = false) => {
+    for (const row of wrapTextToRows(text, contentWidth)) {
+      rows.push({ text: row, color, dimColor });
+    }
+  };
 
-  // Rich tool display with diff lines
   if (message.kind === "tool" && message.diffLines && message.diffLines.length > 0) {
-    return (
-      <Box marginBottom={1}>
-        <Box width={3}>
-          <Text color="yellow">●</Text>
-        </Box>
-        <Box flexDirection="column" flexGrow={1}>
-          <Text color="yellow" bold>{message.title}</Text>
-          {message.subtitle ? <Text color="gray">  {message.subtitle}</Text> : null}
-          {message.diffLines.map((line, i) => (
-            <Text key={i} color={line.color}>{line.text}</Text>
-          ))}
-        </Box>
-      </Box>
-    );
+    if (message.title) {
+      appendRows(message.title, "yellow");
+    }
+    if (message.subtitle) {
+      appendRows(`  ${message.subtitle}`, "gray");
+    }
+    for (const line of message.diffLines) {
+      appendRows(line.text, line.color);
+    }
+
+    return rows.map((row, index) => ({
+      id: `${message.id}-${index}`,
+      prefix: index === 0 ? "● " : "  ",
+      prefixColor: index === 0 ? "yellow" : undefined,
+      text: row.text,
+      color: row.color,
+      dimColor: row.dimColor,
+    }));
   }
 
-  // Collapsed thinking: show summary line only
   if (message.kind === "thinking" && message.collapsed) {
     const lineCount = (message.text || "").split("\n").length;
     const preview = ellipsize((message.text || "").split("\n")[0].trim(), 60);
-    return (
-      <Box marginBottom={1}>
-        <Box width={3}>
-          <Text color="gray">▸</Text>
-        </Box>
-        <Box flexGrow={1}>
-          <Text color="gray" dimColor>[thinking · {lineCount} lines] {preview}</Text>
-        </Box>
-      </Box>
-    );
+    appendRows(`[thinking · ${lineCount} lines] ${preview}`, "gray", true);
+    return rows.map((row, index) => ({
+      id: `${message.id}-${index}`,
+      prefix: index === 0 ? "▸ " : "  ",
+      prefixColor: index === 0 ? "gray" : undefined,
+      text: row.text,
+      color: row.color,
+      dimColor: row.dimColor,
+    }));
   }
 
   const displayText = message.kind === "assistant"
     ? renderMarkdown(message.text || " ")
     : (message.text || " ");
 
+  if (message.title) {
+    appendRows(`[${message.title}]`, titleColor);
+  }
+  appendRows(displayText, message.kind === "assistant" ? undefined : bodyColor, message.kind === "thinking");
+
+  return rows.map((row, index) => ({
+    id: `${message.id}-${index}`,
+    prefix: index === 0 ? `${marker?.symbol ?? " "} ` : "  ",
+    prefixColor: index === 0 ? marker?.color : undefined,
+    text: row.text,
+    color: row.color,
+    dimColor: row.dimColor,
+  }));
+}
+
+function buildViewportRows(messages: UiMessage[], width: number): ViewportRow[] {
+  const rows: ViewportRow[] = [];
+
+  messages.forEach((message, index) => {
+    rows.push(...buildMessageRows(message, width));
+    if (index < messages.length - 1) {
+      rows.push({
+        id: `${message.id}-spacer`,
+        prefix: "  ",
+        text: " ",
+      });
+    }
+  });
+
+  return rows;
+}
+
+function selectVisibleRows(rows: ViewportRow[], availableLines: number, scrollOffset: number): {
+  rows: ViewportRow[];
+  maxScrollOffset: number;
+  effectiveScrollOffset: number;
+} {
+  if (availableLines <= 0) {
+    return { rows: [], maxScrollOffset: 0, effectiveScrollOffset: 0 };
+  }
+
+  const maxScrollOffset = Math.max(0, rows.length - availableLines);
+  const effectiveScrollOffset = Math.max(0, Math.min(maxScrollOffset, scrollOffset));
+  const endExclusive = rows.length - effectiveScrollOffset;
+  const start = Math.max(0, endExclusive - availableLines);
+
+  return {
+    rows: rows.slice(start, endExclusive),
+    maxScrollOffset,
+    effectiveScrollOffset,
+  };
+}
+
+function ViewportRowView({ row }: { row: ViewportRow }) {
   return (
-    <Box marginBottom={1}>
-      <Box width={3}>
-        <Text color={marker?.color}>{marker?.symbol ?? " "}</Text>
-      </Box>
-      <Box flexDirection="column" flexGrow={1}>
-        {message.title ? <Text color={titleColor}>[{message.title}]</Text> : null}
-        <Text color={bodyColor}>{displayText}</Text>
-      </Box>
-    </Box>
+    <Text wrap="truncate-end" color={row.color} dimColor={row.dimColor}>
+      <Text color={row.prefixColor}>{row.prefix}</Text>
+      {row.text}
+    </Text>
   );
 }
 
@@ -629,6 +698,7 @@ function ModelSelectPrompt({ choices, selectedIndex, activeModelId }: ModelSelec
 
 function CliApp() {
   const { exit } = useApp();
+  const { internal_eventEmitter } = useStdin();
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -638,6 +708,7 @@ function CliApp() {
   const [trustSelection, setTrustSelection] = useState(0);
   const [modelSelectionIndex, setModelSelectionIndex] = useState(0);
   const [slashSelection, setSlashSelection] = useState(0);
+  const [scrollOffset, setScrollOffset] = useState(0);
   const modelChoices = useRef(buildModelChoices());
   const [terminalSize, setTerminalSize] = useState({
     columns: process.stdout.columns ?? 80,
@@ -649,6 +720,10 @@ function CliApp() {
   const assistantMessageIdRef = useRef<string | undefined>(undefined);
   const thinkingMessageIdRef = useRef<string | undefined>(undefined);
   const skipSubmitRef = useRef(false);
+  const activeTurnAbortRef = useRef<AbortController | null>(null);
+  const stopRequestedRef = useRef(false);
+  const maxScrollOffsetRef = useRef(0);
+  const pageScrollSizeRef = useRef(10);
   const agentStateRef = useRef<AgentState>({
     chatHistory: [],
     turnCount: 0,
@@ -664,6 +739,17 @@ function CliApp() {
   useEffect(() => {
     setSlashSelection(0);
   }, [inputValue]);
+
+  const clampScrollOffset = (value: number): number => Math.max(0, Math.min(maxScrollOffsetRef.current, value));
+  const scrollHistoryBy = (delta: number) => {
+    setScrollOffset((current) => clampScrollOffset(current + delta));
+  };
+  const scrollHistoryToLatest = () => {
+    setScrollOffset(0);
+  };
+  const scrollHistoryToOldest = () => {
+    setScrollOffset(maxScrollOffsetRef.current);
+  };
 
   useEffect(() => {
     const handleResize = () => {
@@ -752,6 +838,7 @@ function CliApp() {
   const resetConversation = () => {
     assistantMessageIdRef.current = undefined;
     thinkingMessageIdRef.current = undefined;
+    scrollHistoryToLatest();
     agentStateRef.current = {
       chatHistory: [],
       turnCount: 0,
@@ -766,11 +853,23 @@ function CliApp() {
     setMessages([headerItem()]);
   };
 
+  const requestActiveTurnStop = () => {
+    const controller = activeTurnAbortRef.current;
+    if (!controller || controller.signal.aborted || stopRequestedRef.current) {
+      return;
+    }
+
+    stopRequestedRef.current = true;
+    controller.abort();
+    pushMessage("system", "Stopping current turn. Session context will be kept.", "stop");
+  };
+
   const acceptTrust = () => {
     setTrusted(true);
     if (modelSelected) {
       // env var already set, skip selection
       if (!currentResolved) ensureConfig();
+      scrollHistoryToLatest();
       setMessages([headerItem()]);
     }
   };
@@ -783,6 +882,7 @@ function CliApp() {
     ensureConfig(choice.provider, choice.modelId);
     setModelSelected(true);
     setUserHasChosenModel(true);
+    scrollHistoryToLatest();
     if (isInitialSelection) {
       setMessages([headerItem()]);
     } else {
@@ -851,6 +951,16 @@ function CliApp() {
 
       if (command === "status") {
         pushMessage("system", sessionStatus(agentStateRef.current), "status");
+        return;
+      }
+
+      if (command === "team") {
+        pushMessage("system", teammateManager.formatTeamStatus(), "team");
+        return;
+      }
+
+      if (command === "inbox") {
+        pushMessage("system", formatMailboxMessages(messageBus.drainInbox("lead")), "inbox");
         return;
       }
 
@@ -943,15 +1053,37 @@ function CliApp() {
     }
 
     pushMessage("user", trimmed);
+    scrollHistoryToLatest();
     setBusy(true);
+    stopRequestedRef.current = false;
+    const abortController = new AbortController();
+    activeTurnAbortRef.current = abortController;
 
     try {
-      await runAgentTurn(agentConfig, trimmed, agentStateRef.current, bridge);
+      const leadInbox = messageBus.drainInbox("lead");
+      if (leadInbox.length > 0) {
+        pushMessage("system", formatMailboxMessages(leadInbox), "inbox");
+      }
+
+      const effectiveQuery = leadInbox.length > 0
+        ? buildLeadInboxQuery(renderInboxPrompt(leadInbox), trimmed)
+        : trimmed;
+
+      await runAgentTurn(agentConfig, effectiveQuery, agentStateRef.current, bridge, { signal: abortController.signal });
     } catch (error) {
       finalizeStreaming();
-      pushMessage("error", error instanceof Error ? error.message : String(error), "error");
+      if (isTurnInterruptedError(error)) {
+        const stopMessage = agentConfig.apiMode === "responses" && !error.responseId
+          ? "Stopped current turn. Prior session context was kept. Resend the interrupted prompt if you want to continue it."
+          : "Stopped current turn. Session context preserved.";
+        pushMessage("system", stopMessage, "stop");
+      } else {
+        pushMessage("error", error instanceof Error ? error.message : String(error), "error");
+      }
     } finally {
       finalizeStreaming();
+      activeTurnAbortRef.current = null;
+      stopRequestedRef.current = false;
       setBusy(false);
     }
   };
@@ -987,13 +1119,45 @@ function CliApp() {
       if (key.escape) {
         setModelSelected(true);
         if (!currentResolved) ensureConfig();
+        scrollHistoryToLatest();
         setMessages([headerItem()]);
         return;
       }
       return;
     }
 
+    if (key.pageUp) {
+      scrollHistoryBy(pageScrollSizeRef.current);
+      return;
+    }
+
+    if (key.pageDown) {
+      scrollHistoryBy(-pageScrollSizeRef.current);
+      return;
+    }
+
+    if (key.home && (busy || inputValue.length === 0)) {
+      scrollHistoryToOldest();
+      return;
+    }
+
+    if (key.end && (busy || inputValue.length === 0)) {
+      scrollHistoryToLatest();
+      return;
+    }
+
     if (busy) {
+      if (key.upArrow || input === "k") {
+        scrollHistoryBy(1);
+        return;
+      }
+      if (key.downArrow || input === "j") {
+        scrollHistoryBy(-1);
+        return;
+      }
+      if (key.escape) {
+        requestActiveTurnStop();
+      }
       return;
     }
 
@@ -1018,6 +1182,18 @@ function CliApp() {
         return;
       }
     }
+
+    if (inputValue.length === 0) {
+      if (key.upArrow || input === "k") {
+        scrollHistoryBy(1);
+        return;
+      }
+
+      if (key.downArrow || input === "j") {
+        scrollHistoryBy(-1);
+        return;
+      }
+    }
   });
 
   const handleSubmit = (value: string) => {
@@ -1039,19 +1215,53 @@ function CliApp() {
 
   const innerWidth = Math.max(0, Math.min(terminalSize.columns - 2, 110));
 
-  const streamingIds = new Set<string>();
-  if (assistantMessageIdRef.current) streamingIds.add(assistantMessageIdRef.current);
-  if (thinkingMessageIdRef.current) streamingIds.add(thinkingMessageIdRef.current);
-  const staticMessages = messages.filter((m) => !streamingIds.has(m.id));
-  const dynamicMessages = messages.filter((m) => streamingIds.has(m.id));
-  const allChatMessages = [...staticMessages.filter((m) => m.id !== "header"), ...dynamicMessages];
+  const allChatMessages = messages.filter((m) => m.id !== "header");
+  const viewportRows = buildViewportRows(allChatMessages, innerWidth);
 
   // Determine which overlay to show (trust / model selection / none)
   const showTrustPrompt = trusted === null;
   const showModelSelect = !showTrustPrompt && !modelSelected;
   const showMainUi = !showTrustPrompt && modelSelected;
-  const reservedLines = 15 + (busy ? 1 : 0) + (showSlashMenu ? slashMatches.length + 2 : 0);
-  const visibleMessages = selectVisibleMessages(allChatMessages, Math.max(4, terminalSize.rows - reservedLines), innerWidth);
+  const reservedLines = 18 + (busy ? 1 : 0) + (showSlashMenu ? slashMatches.length + 1 : 0);
+  const availableMessageLines = Math.max(1, terminalSize.rows - reservedLines);
+  const { rows: visibleRows, maxScrollOffset, effectiveScrollOffset } = selectVisibleRows(viewportRows, availableMessageLines, scrollOffset);
+
+  maxScrollOffsetRef.current = maxScrollOffset;
+  pageScrollSizeRef.current = Math.max(1, availableMessageLines - 2);
+
+  useEffect(() => {
+    setScrollOffset((current) => clampScrollOffset(current));
+  }, [maxScrollOffset]);
+
+  useEffect(() => {
+    if (!showMainUi || !process.stdout.isTTY) {
+      return;
+    }
+
+    const emitter = internal_eventEmitter as EventEmitter;
+    const originalEmit = emitter.emit.bind(emitter);
+    const patchedEmit: EventEmitter["emit"] = ((eventName: string | symbol, ...args: unknown[]) => {
+      if (eventName === "input" && typeof args[0] === "string") {
+        const mouseInput = parseMouseInputSequence(args[0]);
+        if (mouseInput) {
+          if (mouseInput.kind === "wheel") {
+            setScrollOffset((current) => Math.max(0, Math.min(maxScrollOffsetRef.current, current + mouseInput.delta)));
+          }
+          return false;
+        }
+      }
+
+      return originalEmit(eventName, ...args);
+    }) as EventEmitter["emit"];
+
+    emitter.emit = patchedEmit;
+    process.stdout.write("\x1b[?1000h\x1b[?1006h");
+
+    return () => {
+      emitter.emit = originalEmit;
+      process.stdout.write("\x1b[?1000l\x1b[?1006l");
+    };
+  }, [internal_eventEmitter, showMainUi]);
 
   return (
     <Box key={`session-${sessionKey}`} flexDirection="column" paddingX={1} height={terminalSize.rows}>
@@ -1079,15 +1289,15 @@ function CliApp() {
           <WelcomePanel width={innerWidth} messages={messages} />
 
           <Box flexDirection="column">
-            {visibleMessages.map((message) => (
-              <MessageView key={message.id} message={message} />
+            {visibleRows.map((row) => (
+              <ViewportRowView key={row.id} row={row} />
             ))}
           </Box>
 
           <Box flexDirection="column">
               <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
-              <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} />
-              {busy ? <Text color="gray">Working... input is locked until the current turn completes.</Text> : null}
+              <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} scrollOffset={effectiveScrollOffset} />
+              {busy ? <Text color="gray">Working... Esc stops this turn. PgUp/PgDn/Home/End browse history.</Text> : null}
               <Box>
                 <Text>› </Text>
                 <TextInput value={inputValue} onChange={setInputValue} onSubmit={handleSubmit} focus={!busy} showCursor={!busy} />

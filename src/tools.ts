@@ -1,15 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 
+import { MessageBus, formatMailboxMessages } from "./message-bus.js";
+import { TeammateManager } from "./teammate-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { SkillLoader } from "./skills.js";
 import type { ToolArgs } from "./types.js";
 
 const execAsync = promisify(exec);
 const WORKDIR = process.cwd();
-import os from "node:os";
+export const LEAD_NAME = "lead" as const;
+export const TEAM_DIR = path.join(WORKDIR, ".team");
 
 const GLOBAL_SKILLS_DIR = path.join(os.homedir(), ".claude", "skills");
 const LOCAL_SKILLS_DIR = path.join(WORKDIR, "skills");
@@ -18,6 +22,8 @@ const LOCAL_SKILLS_DIR = path.join(WORKDIR, "skills");
 export const skillLoader = new SkillLoader([GLOBAL_SKILLS_DIR, LOCAL_SKILLS_DIR]);
 
 export const taskManager = new TaskManager(path.join(WORKDIR, ".tasks"));
+export const messageBus = new MessageBus(TEAM_DIR);
+export const teammateManager = new TeammateManager(TEAM_DIR, messageBus, LEAD_NAME);
 
 function safePath(relativePath: string): string {
   const resolved = path.resolve(WORKDIR, relativePath);
@@ -39,7 +45,7 @@ function toExecError(error: unknown): { stdout?: string; stderr?: string } {
   return {};
 }
 
-async function runBash(command: string): Promise<string> {
+async function runBash(command: string, signal?: AbortSignal): Promise<string> {
   const dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
   if (dangerous.some((snippet) => command.includes(snippet))) {
     return "Error: Dangerous command blocked";
@@ -51,10 +57,15 @@ async function runBash(command: string): Promise<string> {
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 10,
       shell: process.env.SHELL,
+      signal,
     });
     const combined = `${stdout}${stderr}`.trim();
     return combined ? combined.slice(0, 50_000) : "(no output)";
   } catch (error) {
+    if ((error as { name?: string } | null | undefined)?.name === "AbortError" || signal?.aborted) {
+      return "Error: Command aborted";
+    }
+
     if (isExecTimeout(error)) {
       return "Error: Timeout (120s)";
     }
@@ -259,28 +270,107 @@ export const TASK_TOOL = {
   },
 } as const;
 
-export const TOOLS = [...BASE_TOOLS, TASK_TOOL] as const;
-
-export const CHAT_TOOLS = TOOLS.map((tool) => ({
+export const TEAM_MESSAGE_TOOL = {
   type: "function",
-  function: {
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
+  name: "message_send",
+  description: "Send an asynchronous message to lead or another teammate.",
+  parameters: {
+    type: "object",
+    properties: {
+      to: { type: "string", description: "Target teammate name, lead, or all when broadcasting" },
+      content: { type: "string", description: "Message body" },
+      type: { type: "string", enum: ["message", "broadcast"] },
+    },
+    required: ["to", "content"],
+    additionalProperties: false,
   },
-}));
+} as const;
 
-export const BASE_CHAT_TOOLS = BASE_TOOLS.map((tool) => ({
+export const TEAMMATE_SPAWN_TOOL = {
   type: "function",
-  function: {
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
+  name: "teammate_spawn",
+  description: "Create a persistent teammate with its own inbox and runtime.",
+  parameters: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Stable teammate name, for example alice" },
+      role: { type: "string", description: "Teammate role or specialty" },
+      prompt: { type: "string", description: "Initial task to deliver to the new teammate" },
+    },
+    required: ["name", "role", "prompt"],
+    additionalProperties: false,
   },
-}));
+} as const;
 
-export const TOOL_HANDLERS: Record<string, (args: ToolArgs) => Promise<string> | string> = {
-  bash: ({ command }) => runBash(String(command)),
+export const TEAMMATE_LIST_TOOL = {
+  type: "function",
+  name: "teammate_list",
+  description: "List current teammates and their statuses.",
+  parameters: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+} as const;
+
+export const TEAMMATE_SHUTDOWN_TOOL = {
+  type: "function",
+  name: "teammate_shutdown",
+  description: "Request a graceful shutdown for one teammate or all teammates.",
+  parameters: {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Teammate name. Omit to stop all teammates." },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
+export const LEAD_INBOX_TOOL = {
+  type: "function",
+  name: "lead_inbox",
+  description: "Read the lead inbox. Set drain=true to clear after reading.",
+  parameters: {
+    type: "object",
+    properties: {
+      drain: { type: "boolean" },
+    },
+    additionalProperties: false,
+  },
+} as const;
+
+export const TOOLS = [
+  ...BASE_TOOLS,
+  TASK_TOOL,
+  TEAM_MESSAGE_TOOL,
+  TEAMMATE_SPAWN_TOOL,
+  TEAMMATE_LIST_TOOL,
+  TEAMMATE_SHUTDOWN_TOOL,
+  LEAD_INBOX_TOOL,
+] as const;
+
+export const TEAMMATE_TOOLS = [
+  ...BASE_TOOLS,
+  TEAM_MESSAGE_TOOL,
+] as const;
+
+function toChatTools<T extends readonly { name: string; description: string; parameters: unknown }[]>(tools: T) {
+  return tools.map((tool) => ({
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    },
+  }));
+}
+
+export const CHAT_TOOLS = toChatTools(TOOLS);
+export const TEAMMATE_CHAT_TOOLS = toChatTools(TEAMMATE_TOOLS);
+export const BASE_CHAT_TOOLS = toChatTools(BASE_TOOLS);
+
+export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { signal?: AbortSignal }) => Promise<string> | string> = {
+  bash: ({ command }, control) => runBash(String(command), control?.signal),
   read_file: ({ path: filePath, limit }) => runRead(String(filePath), toOptionalNumber(limit)),
   write_file: ({ path: filePath, content }) => runWrite(String(filePath), String(content)),
   edit_file: ({ path: filePath, old_text, new_text }) => runEdit(String(filePath), String(old_text), String(new_text)),
@@ -295,4 +385,6 @@ export const TOOL_HANDLERS: Record<string, (args: ToolArgs) => Promise<string> |
   task_list: () => taskManager.list(),
   task_get: ({ task_id }) => taskManager.get(Number(task_id)),
   load_skill: ({ name }) => skillLoader.getContent(String(name)),
+  teammate_list: () => teammateManager.formatTeamStatus(),
+  lead_inbox: ({ drain }) => formatMailboxMessages(Boolean(drain) ? messageBus.drainInbox(LEAD_NAME) : messageBus.readInbox(LEAD_NAME)),
 };

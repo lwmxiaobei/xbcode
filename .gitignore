@@ -31,3 +31,6 @@ temp/
 *.tmp
 *.tasks
 *.transcripts
+.tasks/
+.team/
+.transcripts/
