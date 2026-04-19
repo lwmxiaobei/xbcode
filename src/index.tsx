@@ -1371,36 +1371,40 @@ function CliApp() {
             ))}
           </Box>
 
-          <Box flexDirection="column">
-              <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
-              <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} scrollOffset={effectiveScrollOffset} />
-              {busy ? <Text color="gray">Working... Esc stops this turn. PgUp/PgDn/Home/End browse history.</Text> : null}
-              <Box>
+          <Box flexDirection="column" width="100%" flexShrink={0}>
+            <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
+            <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} scrollOffset={effectiveScrollOffset} />
+            {busy ? <Text color="gray">Working... Esc stops this turn. PgUp/PgDn/Home/End browse history.</Text> : null}
+            <Box width="100%" flexDirection="row">
+              <Box width={2} flexShrink={0}>
                 <Text>› </Text>
+              </Box>
+              <Box flexGrow={1} flexShrink={1}>
                 <TextInput value={inputValue} onChange={setInputValue} onSubmit={handleSubmit} focus={!busy} showCursor={!busy} />
               </Box>
-              {showSlashMenu ? (
-                <Box flexDirection="column" marginTop={1}>
-                  {slashMatches.map(({ command, description }, index) => {
-                    const selected = index === activeSlashIndex;
+            </Box>
+            {showSlashMenu ? (
+              <Box flexDirection="column" marginTop={1}>
+                {slashMatches.map(({ command, description }, index) => {
+                  const selected = index === activeSlashIndex;
 
-                    return (
-                      <Box key={command}>
-                        <Box width={2}>
-                          <Text color={selected ? "cyan" : "gray"}>{selected ? "*" : " "}</Text>
-                        </Box>
-                        <Text color={selected ? "cyan" : "white"}>{command}</Text>
-                        <Text color="gray"> – {description}</Text>
+                  return (
+                    <Box key={command}>
+                      <Box width={2}>
+                        <Text color={selected ? "cyan" : "gray"}>{selected ? "*" : " "}</Text>
                       </Box>
-                    );
-                  })}
-                </Box>
-              ) : null}
-              <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
+                      <Text color={selected ? "cyan" : "white"}>{command}</Text>
+                      <Text color="gray"> – {description}</Text>
+                    </Box>
+                  );
+                })}
+              </Box>
+            ) : null}
+            <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
+            {userHasChosenModel && currentResolved
+              ? <Text color="gray">{currentResolved.providerName}: {currentResolved.model} | api: {currentResolved.apiMode} | {ellipsize(currentResolved.baseURL, 40)}</Text>
+              : <Text color="red">No model selected. Use /model to select one.</Text>}
           </Box>
-          {userHasChosenModel && currentResolved
-            ? <Text color="gray">{currentResolved.providerName}: {currentResolved.model} | api: {currentResolved.apiMode} | {ellipsize(currentResolved.baseURL, 40)}</Text>
-            : <Text color="red">No model selected. Use /model to select one.</Text>}
         </>
       ) : null}
     </Box>

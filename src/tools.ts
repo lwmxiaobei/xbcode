@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { MessageBus, formatMailboxMessages } from "./message-bus.js";
 import { TeammateManager } from "./teammate-manager.js";
 import { TaskManager } from "./task-manager.js";
-import { SkillLoader } from "./skills.js";
+import { SkillLoader } from "./skills/index.js";
 import { handleListMcpResources, handleMcpCall, handleReadMcpResource } from "./mcp-runtime.js";
 import type { ToolArgs } from "./types.js";
 
@@ -306,6 +306,7 @@ export const BASE_TOOLS = [
       type: "object",
       properties: {
         name: { type: "string", description: "Skill name to load" },
+        args: { type: "string", description: "Optional arguments or scope for the skill" },
       },
       required: ["name"],
       additionalProperties: false,
@@ -455,7 +456,7 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
     ),
   task_list: () => taskManager.list(),
   task_get: ({ task_id }) => taskManager.get(Number(task_id)),
-  load_skill: ({ name }) => skillLoader.getContent(String(name)),
+  load_skill: ({ name, args }) => skillLoader.renderSkill(String(name), toOptionalString(args)),
   teammate_list: () => teammateManager.formatTeamStatus(),
   lead_inbox: ({ drain }) => formatMailboxMessages(drain ? messageBus.drainInbox(LEAD_NAME) : messageBus.readInbox(LEAD_NAME)),
 };
