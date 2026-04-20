@@ -2,11 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { debugLog } from "../utils.js";
 import { buildSkillDescriptor, parseSkillFile } from "./frontmatter.js";
-import { renderSkillContent } from "./render.js";
-import type { SkillDescriptor } from "./types.js";
+import { renderPromptCommand } from "./render.js";
+import type { PromptCommand, SkillDescriptor } from "./types.js";
 
 export class SkillLoader {
-  private skills = new Map<string, SkillDescriptor>();
+  private commands = new Map<string, PromptCommand>();
 
   constructor(skillsDirs: string[]) {
     for (const dir of skillsDirs) {
@@ -28,33 +28,71 @@ export class SkillLoader {
       const text = fs.readFileSync(filePath, "utf8");
       const { meta, body } = parseSkillFile(text);
       const descriptor = buildSkillDescriptor(meta, body, entry.name, filePath, baseDir);
-      this.skills.set(descriptor.name, descriptor);
+      this.commands.set(descriptor.name, this.toPromptCommand(descriptor));
     }
   }
 
-  getDescriptions(): string {
-    const skills = [...this.skills.values()];
-    debugLog("skills=%s", skills);
-    if (skills.length === 0) return "(no skills available)";
+  private toPromptCommand(skill: SkillDescriptor): PromptCommand {
+    return {
+      name: skill.name,
+      description: skill.description,
+      tags: skill.tags,
+      whenToUse: skill.whenToUse,
+      allowedTools: [...skill.allowedTools],
+      argumentHint: skill.argumentHint,
+      content: skill.body,
+      filePath: skill.filePath,
+      baseDir: skill.baseDir,
+      source: "skill",
+    };
+  }
 
-    return skills
-      .map((skill) => {
-        let line = ` - ${skill.name}: ${skill.description}`;
-        if (skill.tags) line += ` [${skill.tags}]`;
+  getPromptCommands(): PromptCommand[] {
+    return [...this.commands.values()];
+  }
+
+  getDescriptions(): string {
+    const commands = this.getPromptCommands();
+    debugLog("promptCommands=%s", commands);
+    if (commands.length === 0) return "(no skills available)";
+
+    return commands
+      .map((command) => {
+        let line = ` - ${command.name}: ${command.description}`;
+        if (command.tags) line += ` [${command.tags}]`;
         return line;
       })
       .join("\n");
   }
 
   getSkill(name: string): SkillDescriptor | undefined {
-    return this.skills.get(name);
+    const command = this.commands.get(name);
+    if (!command) {
+      return undefined;
+    }
+
+    return {
+      name: command.name,
+      description: command.description,
+      tags: command.tags,
+      whenToUse: command.whenToUse,
+      allowedTools: [...command.allowedTools],
+      argumentHint: command.argumentHint,
+      body: command.content,
+      filePath: command.filePath,
+      baseDir: command.baseDir,
+    };
+  }
+
+  getCommand(name: string): PromptCommand | undefined {
+    return this.commands.get(name);
   }
 
   renderSkill(name: string, args?: string): string {
-    const skill = this.skills.get(name);
-    if (!skill) {
-      return `Error: Unknown skill '${name}'. Available: ${[...this.skills.keys()].join(", ")}`;
+    const command = this.commands.get(name);
+    if (!command) {
+      return `Error: Unknown skill '${name}'. Available: ${[...this.commands.keys()].join(", ")}`;
     }
-    return renderSkillContent(skill, args);
+    return renderPromptCommand(command, args);
   }
 }

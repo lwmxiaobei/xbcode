@@ -8,7 +8,7 @@ import { MessageBus, formatMailboxMessages } from "./message-bus.js";
 import { TeammateManager } from "./teammate-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { SkillLoader } from "./skills/index.js";
-import { handleListMcpResources, handleMcpCall, handleReadMcpResource } from "./mcp-runtime.js";
+import { handleListMcpResources, handleMcpCall, handleReadMcpResource } from "./mcp/runtime.js";
 import type { ToolArgs } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -437,7 +437,7 @@ export const TEAMMATE_CHAT_TOOLS = toChatTools(TEAMMATE_TOOLS);
 export const BASE_CHAT_TOOLS = toChatTools(BASE_TOOLS);
 
 // 这里是“工具名 -> 实际执行函数”的路由表。
-// `mcp_call` 在这一层接入到 mcp-runtime，由后者继续完成初始化、校验和分发。
+// `mcp_call` 在这一层接入到 MCP runtime，由后者继续完成初始化、校验和分发。
 export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { signal?: AbortSignal }) => Promise<string> | string> = {
   bash: ({ command }, control) => runBash(String(command), control?.signal),
   read_file: ({ path: filePath, limit }) => runRead(String(filePath), toOptionalNumber(limit)),

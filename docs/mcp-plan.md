@@ -53,9 +53,9 @@
   ### 2. 新增 MCP Runtime 层
 
   - 新增模块，建议拆为：
-      - src/mcp-types.ts：MCP 配置、server 状态、缓存对象、统一错误类型
-      - src/mcp-client.ts：单个 server 的连接、握手、请求发送、超时和重连
-      - src/mcp-manager.ts：多 server 注册、缓存刷新、调用路由、状态汇总
+      - src/mcp/types.ts：MCP 配置、server 状态、缓存对象、统一错误类型
+      - src/mcp/client.ts：单个 server 的连接、握手、请求发送、超时和重连
+      - src/mcp/manager.ts：多 server 注册、缓存刷新、调用路由、状态汇总
   - McpManager 提供固定接口：
       - initializeAll()
       - refresh(serverName?)

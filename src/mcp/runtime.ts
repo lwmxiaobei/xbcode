@@ -1,9 +1,9 @@
-import { getSettingsWarnings, loadSettings, reloadSettings } from "./config.js";
-import { type McpGetPromptResult, type McpReadResourceResult, type McpToolCallResult } from "./mcp-client.js";
-import { McpManager } from "./mcp-manager.js";
-import { McpRuntimeError, type McpCallArgs } from "./mcp-types.js";
-import type { ToolArgs } from "./types.js";
-import { isPlainRecord } from "./utils.js";
+import { getSettingsWarnings, loadSettings, reloadSettings } from "../config.js";
+import { type McpGetPromptResult, type McpReadResourceResult, type McpToolCallResult } from "./client.js";
+import { McpManager } from "./manager.js";
+import { McpRuntimeError, type McpCallArgs } from "./types.js";
+import type { ToolArgs } from "../types.js";
+import { isPlainRecord } from "../utils.js";
 
 const OUTPUT_LIMIT = 50_000;
 const DYNAMIC_MCP_TOOL_NAME_LIMIT = 64;

@@ -19,3 +19,15 @@ export type SkillDescriptor = {
   baseDir?: string;
 };
 
+export type PromptCommand = {
+  name: string;
+  description: string;
+  tags?: string;
+  whenToUse?: string;
+  allowedTools: string[];
+  argumentHint?: string;
+  content: string;
+  filePath: string;
+  baseDir?: string;
+  source: "skill";
+};

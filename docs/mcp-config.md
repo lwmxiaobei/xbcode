@@ -429,7 +429,7 @@ MCP 配置挂在根对象的 `mcp.servers` 下。
 如果你想确认本地 MCP 配置是否真的连上，而不是只停留在“JSON 写对了”，可以在项目根目录运行：
 
 ```bash
-npx tsx -e "(async function () { const mod = await import('./src/mcp-runtime.ts'); await mod.ensureMcpInitialized(); console.log(mod.mcpManager.formatStatusReport()); })().catch((error) => { console.error(error); process.exit(1); });"
+npx tsx -e "(async function () { const mod = await import('./src/mcp/runtime.ts'); await mod.ensureMcpInitialized(); console.log(mod.mcpManager.formatStatusReport()); })().catch((error) => { console.error(error); process.exit(1); });"
 ```
 
 这条命令会直接走当前项目的 MCP 运行时初始化流程，并打印状态报告。

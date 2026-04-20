@@ -36,13 +36,13 @@ MCP 相关代码主要分布在这几层：
 - `src/config.ts`
   - 读取 `~/.codemini/settings.json`
   - 校验和归一化 `mcp.servers`
-- `src/mcp-types.ts`
+- `src/mcp/types.ts`
   - MCP 运行时的核心类型和错误类型
-- `src/mcp-client.ts`
+- `src/mcp/client.ts`
   - 单个 MCP server 的连接、能力发现、缓存、请求发送
-- `src/mcp-manager.ts`
+- `src/mcp/manager.ts`
   - 多个 server 的配置同步、生命周期管理、状态汇总
-- `src/mcp-runtime.ts`
+- `src/mcp/runtime.ts`
   - MCP 到 agent 工具系统的适配层
 - `src/tools.ts`
   - 本地工具注册和 handler 路由
@@ -56,9 +56,9 @@ MCP 相关代码主要分布在这几层：
 ```text
 LLM / agent loop
   -> tools.ts
-  -> mcp-runtime.ts
-  -> mcp-manager.ts
-  -> mcp-client.ts
+  -> mcp/runtime.ts
+  -> mcp/manager.ts
+  -> mcp/client.ts
   -> MCP server
 ```
 
@@ -127,7 +127,7 @@ MCP 配置统一来自：
 
 ## 4. 核心类型
 
-`src/mcp-types.ts` 定义了整个子系统共享的数据结构。
+`src/mcp/types.ts` 定义了整个子系统共享的数据结构。
 
 ### 4.1 配置和状态
 
@@ -165,7 +165,7 @@ MCP 配置统一来自：
 
 ## 5. 单连接实现：`McpClientConnection`
 
-`src/mcp-client.ts` 里的 `McpClientConnection` 表示“一个 MCP server 的完整连接状态机”。
+`src/mcp/client.ts` 里的 `McpClientConnection` 表示“一个 MCP server 的完整连接状态机”。
 
 ### 5.1 它负责什么
 
@@ -288,7 +288,7 @@ MCP 配置统一来自：
 
 ## 6. 多连接管理：`McpManager`
 
-`src/mcp-manager.ts` 管理所有 server。
+`src/mcp/manager.ts` 管理所有 server。
 
 ### 6.1 核心职责
 
@@ -351,7 +351,7 @@ MCP 配置统一来自：
   - `roots`
   - `elicitation`
 
-## 7. 运行时适配：`mcp-runtime.ts`
+## 7. 运行时适配：`mcp/runtime.ts`
 
 这一层最重要，因为它直接决定“模型看见什么工具、实际怎么执行、结果怎么格式化”。
 
@@ -487,7 +487,7 @@ mcp__server__tool__<hash>
 
 MCP SDK 返回的是结构化对象，不能直接塞给当前工具系统。
 
-`src/mcp-runtime.ts` 负责把它们统一转成字符串。
+`src/mcp/runtime.ts` 负责把它们统一转成字符串。
 
 ### 10.1 Tool result
 
@@ -763,10 +763,10 @@ tool: ...
 
 如果你第一次接手这块代码，建议按这个顺序读：
 
-1. `src/mcp-types.ts`
-2. `src/mcp-manager.ts`
-3. `src/mcp-runtime.ts`
-4. `src/mcp-client.ts`
+1. `src/mcp/types.ts`
+2. `src/mcp/manager.ts`
+3. `src/mcp/runtime.ts`
+4. `src/mcp/client.ts`
 5. `src/tools.ts`
 6. `src/agent.ts`
 
@@ -775,4 +775,4 @@ tool: ...
 - 先建立“系统边界和对外接口”
 - 再进入“单连接 transport 细节”
 
-这样比一上来就读 `mcp-client.ts` 更容易建立整体模型。
+这样比一上来就读 `mcp/client.ts` 更容易建立整体模型。

@@ -20,7 +20,7 @@
 | s10 团队协议 | 已实现 | `src/message-bus.ts`、`src/agent.ts` | 基于 inbox 的异步消息协议 |
 | s11 自主 Agent | 部分实现 | `src/agent.ts`、`src/index.tsx` | 能自主用工具，但没有长期调度器 |
 | s12 Worktree + 任务隔离 | 未实现 | - | 当前仍共享同一个工作目录 |
-| s13 MCP 集成 | 已实现 | `src/config.ts`、`src/mcp-runtime.ts`、`src/mcp-manager.ts` | MCP tool 动态暴露，resource/prompt 走 `mcp_call` |
+| s13 MCP 集成 | 已实现 | `src/config.ts`、`src/mcp/runtime.ts`、`src/mcp/manager.ts` | MCP tool 动态暴露，resource/prompt 走 `mcp_call` |
 
 ---
 
@@ -889,10 +889,10 @@ export type MailboxMessageType =
 相关文件：
 
 - `src/config.ts`
-- `src/mcp-types.ts`
-- `src/mcp-client.ts`
-- `src/mcp-manager.ts`
-- `src/mcp-runtime.ts`
+- `src/mcp/types.ts`
+- `src/mcp/client.ts`
+- `src/mcp/manager.ts`
+- `src/mcp/runtime.ts`
 
 ### 配置入口
 
@@ -927,9 +927,9 @@ MCP 调用链是：
 ```text
 LLM / Tool call
   -> tools.ts
-  -> mcp-runtime.ts
-  -> mcp-manager.ts
-  -> mcp-client.ts
+  -> mcp/runtime.ts
+  -> mcp/manager.ts
+  -> mcp/client.ts
   -> MCP server
 ```
 
@@ -986,7 +986,7 @@ MCP 不是启动时一股脑阻塞初始化，而是：
    理解任务板
 5. `src/message-bus.ts` + `src/teammate-manager.ts`
    理解 Agent Teams
-6. `src/mcp-runtime.ts` + `src/mcp-manager.ts`
+6. `src/mcp/runtime.ts` + `src/mcp/manager.ts`
    理解 MCP
 
 一句话总结当前项目：

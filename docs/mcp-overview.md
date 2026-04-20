@@ -3,14 +3,14 @@
 把这套 MCP 代码想成一个“总机 + 前台 + 值班表”的系统：
 
 - `tools.ts` 像前台，负责把外部请求接进来
-- `mcp-runtime.ts` 像总机，把请求整理后转给正确的人
-- `mcp-manager.ts` 像值班主管，管理所有 MCP server 的连接状态
-- `mcp-client.ts` 像某一位具体值班员，负责和单个 MCP server 真正通话
-- `mcp-types.ts` 像统一表单，定义所有人都要遵守的数据结构和错误格式
+- `mcp/runtime.ts` 像总机，把请求整理后转给正确的人
+- `mcp/manager.ts` 像值班主管，管理所有 MCP server 的连接状态
+- `mcp/client.ts` 像某一位具体值班员，负责和单个 MCP server 真正通话
+- `mcp/types.ts` 像统一表单，定义所有人都要遵守的数据结构和错误格式
 
 如果只记一条主线，可以记成：
 
-`模型/工具调用 -> tools.ts -> mcp-runtime.ts -> mcp-manager.ts -> mcp-client.ts -> MCP server`
+`模型/工具调用 -> tools.ts -> mcp/runtime.ts -> mcp/manager.ts -> mcp/client.ts -> MCP server`
 
 如果你需要面向维护者的代码级说明，看：
 
@@ -32,20 +32,20 @@
                            |
                            v
                 +----------------------+
-                |   mcp-runtime.ts     |
+                |   mcp/runtime.ts     |
                 | 初始化 / 参数校验 / 分发 |
                 +----------+-----------+
                            |
                            v
                 +----------------------+
-                |   mcp-manager.ts     |
+                |   mcp/manager.ts     |
                 | 多 server 管理与汇总   |
                 +----+-------------+---+
                      |             |
           server A   |             |   server B
                      v             v
            +----------------+ +----------------+
-           | mcp-client.ts  | | mcp-client.ts  |
+           | mcp/client.ts  | | mcp/client.ts  |
            | 单连接生命周期   | | 单连接生命周期   |
            +--------+-------+ +--------+-------+
                     |                  |
@@ -57,7 +57,7 @@
 
 ## 文件职责
 
-### `src/mcp-types.ts`
+### `src/mcp/types.ts`
 
 这一层只定义“数据长什么样”。
 
@@ -76,7 +76,7 @@
 
 这层的作用很像“协议契约”。后面的 runtime、manager、client 都围绕这些类型协作。
 
-### `src/mcp-client.ts`
+### `src/mcp/client.ts`
 
 这一层负责“单个 server 的真实连接”。
 
@@ -96,7 +96,7 @@
 - `McpManager` 管的是“有多少个 server”
 - `McpClientConnection` 管的是“某一个 server 现在到底连没连上、能不能调用、出错后怎么恢复”
 
-### `src/mcp-manager.ts`
+### `src/mcp/manager.ts`
 
 这一层负责“多 server 管理”。
 
@@ -111,9 +111,9 @@
 - 生成提示词摘要和 CLI 状态报告
 - 把调用路由到指定 server
 
-这层的价值在于把“多个 server 的协调问题”单独隔离出来，不让 `mcp-runtime.ts` 或 `tools.ts` 直接关心连接细节。
+这层的价值在于把“多个 server 的协调问题”单独隔离出来，不让 `mcp/runtime.ts` 或 `tools.ts` 直接关心连接细节。
 
-### `src/mcp-runtime.ts`
+### `src/mcp/runtime.ts`
 
 这一层负责“面向工具系统的适配”。
 
@@ -157,19 +157,19 @@
 1. 模型决定调用 `mcp_call`
 2. `tools.ts` 中的 `BASE_TOOL_HANDLERS.mcp_call` 接到请求
 3. `tools.ts` 把参数原样交给 `handleMcpCall()`
-4. `mcp-runtime.ts` 调用 `ensureMcpInitialized()`
-5. `mcp-runtime.ts` 校验参数是否合法
-6. `mcp-runtime.ts` 根据 `kind` 选择：
+4. `mcp/runtime.ts` 调用 `ensureMcpInitialized()`
+5. `mcp/runtime.ts` 校验参数是否合法
+6. `mcp/runtime.ts` 根据 `kind` 选择：
    - `tool` -> `mcpManager.callTool()`
    - `resource` -> `mcpManager.readResource()`
    - `prompt` -> `mcpManager.getPrompt()`
-7. `mcp-manager.ts` 找到对应 server 的连接对象
-8. `mcp-client.ts` 检查：
+7. `mcp/manager.ts` 找到对应 server 的连接对象
+8. `mcp/client.ts` 检查：
    - server 是否启用
    - 是否已连接
    - 是否支持对应 capability
-9. `mcp-client.ts` 调 MCP SDK 发起真实请求
-10. 请求结果回到 `mcp-runtime.ts`，再被格式化成字符串返回
+9. `mcp/client.ts` 调 MCP SDK 发起真实请求
+10. 请求结果回到 `mcp/runtime.ts`，再被格式化成字符串返回
 
 ## 初始化流程
 
@@ -274,7 +274,7 @@
 
 MCP SDK 返回的是结构化对象，但工具系统最终要返回字符串。
 
-所以 `mcp-runtime.ts` 负责把不同返回类型整理成统一文本。
+所以 `mcp/runtime.ts` 负责把不同返回类型整理成统一文本。
 
 ### tool
 
@@ -318,7 +318,7 @@ MCP server 可能只支持：
 
 中的一部分。
 
-所以 `mcp-client.ts` 里会先做 `requireCapability(...)` 校验。
+所以 `mcp/client.ts` 里会先做 `requireCapability(...)` 校验。
 
 ### 2. 以为缓存失败就应该直接中断整个连接
 
@@ -359,7 +359,7 @@ MCP server 可能只支持：
 - `stdio` 更关心进程 stderr 和连接关闭
 - HTTP 更关心状态码和传输错误
 
-所以 `mcp-client.ts` 会单独处理：
+所以 `mcp/client.ts` 会单独处理：
 
 - `lastStderr`
 - `StreamableHTTPError`
@@ -369,18 +369,18 @@ MCP server 可能只支持：
 
 如果第一次看这套代码，推荐按这个顺序读：
 
-1. `src/mcp-types.ts`
+1. `src/mcp/types.ts`
    - 先搞清楚数据结构和错误码
-2. `src/mcp-runtime.ts`
+2. `src/mcp/runtime.ts`
    - 理解外部调用入口长什么样
-3. `src/mcp-manager.ts`
+3. `src/mcp/manager.ts`
    - 理解多 server 是怎么管理的
-4. `src/mcp-client.ts`
+4. `src/mcp/client.ts`
    - 最后看单个 server 的连接细节
 5. `src/tools.ts`
    - 看它是怎么接到 agent 工具系统里的
 
-这样读会比一上来就扎进 `mcp-client.ts` 更容易建立全局视角。
+这样读会比一上来就扎进 `mcp/client.ts` 更容易建立全局视角。
 
 ## 和 `docs/mcp-plan.md` 的关系
 

@@ -1,7 +1,7 @@
 import OpenAI, { APIUserAbortError } from "openai";
 
 import { microCompact, estimateTokens, autoCompact, TOKEN_THRESHOLD } from "./compact.js";
-import { getDynamicMcpToolSurface } from "./mcp-runtime.js";
+import { getDynamicMcpToolSurface } from "./mcp/runtime.js";
 import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, BASE_CHAT_TOOLS, TEAMMATE_TOOLS, TEAMMATE_CHAT_TOOLS, BASE_TOOL_HANDLERS, taskManager } from "./tools.js";
 import { renderInboxPrompt } from "./message-bus.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";

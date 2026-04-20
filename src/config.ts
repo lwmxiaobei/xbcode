@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-import type { McpServerConfig } from "./mcp-types.js";
+import type { McpServerConfig } from "./mcp/types.js";
 import { isPlainRecord } from "./utils.js";
 
 export type ModelEntry = {

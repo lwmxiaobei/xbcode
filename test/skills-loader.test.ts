@@ -35,10 +35,12 @@ Check the diff carefully.
   const loader = new SkillLoader([root]);
   const descriptions = loader.getDescriptions();
   const descriptor = loader.getSkill("code-review");
+  const command = loader.getCommand("code-review");
 
   assert.match(descriptions, /code-review: Review code for regressions/);
   assert.match(descriptions, /\[development,quality\]/);
   assert.ok(descriptor);
+  assert.ok(command);
   assert.equal(descriptor?.name, "code-review");
   assert.equal(descriptor?.description, "Review code for regressions");
   assert.equal(descriptor?.whenToUse, "When reviewing diffs or suspicious behavior");
@@ -46,6 +48,8 @@ Check the diff carefully.
   assert.equal(descriptor?.argumentHint, "diff-or-scope");
   assert.equal(descriptor?.body.trim(), "# Review\n\nCheck the diff carefully.");
   assert.equal(descriptor?.baseDir, skillDir);
+  assert.equal(command?.source, "skill");
+  assert.equal(command?.content.trim(), "# Review\n\nCheck the diff carefully.");
 });
 
 test("later skill directories override earlier ones by skill name", () => {

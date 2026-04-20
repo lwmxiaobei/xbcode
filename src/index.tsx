@@ -19,7 +19,7 @@ import { isTurnInterruptedError, runAgentTurn, type AgentConfig } from "./agent.
 import { resolveConfig, getProviderNames, getProviderModels, loadSettings, reloadSettings, getSettingsPath, normalizeModelEntry, type ResolvedConfig } from "./config.js";
 import { estimateTokens, autoCompact } from "./compact.js";
 import { formatMailboxMessages, renderInboxPrompt } from "./message-bus.js";
-import { ensureMcpInitialized, getMcpPromptInstructions, mcpManager, primeMcpRuntime, refreshMcpFromSettings } from "./mcp-runtime.js";
+import { ensureMcpInitialized, getMcpPromptInstructions, mcpManager, primeMcpRuntime, refreshMcpFromSettings } from "./mcp/runtime.js";
 import { skillLoader, messageBus, teammateManager } from "./tools.js";
 import type { AgentState, DiffLine, UiBridge, UiMessage } from "./types.js";
 import { ellipsize } from "./utils.js";

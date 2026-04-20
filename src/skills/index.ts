@@ -1,4 +1,3 @@
 export { SkillLoader } from "./loader.js";
-export { renderSkillContent } from "./render.js";
-export type { SkillDescriptor, SkillFrontmatter } from "./types.js";
-
+export { renderPromptCommand, renderSkillContent } from "./render.js";
+export type { PromptCommand, SkillDescriptor, SkillFrontmatter } from "./types.js";

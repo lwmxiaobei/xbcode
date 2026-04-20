@@ -1,6 +1,6 @@
-import { McpClientConnection, type McpGetPromptResult, type McpReadResourceResult, type McpToolCallResult } from "./mcp-client.js";
-import { McpRuntimeError, type McpCapabilitySnapshot, type McpCallKind, type McpServerConfig, type McpServerState } from "./mcp-types.js";
-import { ellipsize } from "./utils.js";
+import { McpClientConnection, type McpGetPromptResult, type McpReadResourceResult, type McpToolCallResult } from "./client.js";
+import { McpRuntimeError, type McpCapabilitySnapshot, type McpCallKind, type McpServerConfig, type McpServerState } from "./types.js";
+import { ellipsize } from "../utils.js";
 
 // 状态报告里把时间戳统一格式化为 ISO，便于日志和排查问题时直接比对。
 function formatTimestamp(value?: number): string {

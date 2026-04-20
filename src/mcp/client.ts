@@ -7,8 +7,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 
-import { McpRuntimeError, type McpPromptDefinition, type McpResourceDefinition, type McpServerCache, type McpServerConfig, type McpServerState, type McpToolDefinition } from "./mcp-types.js";
-import { isPlainRecord } from "./utils.js";
+import { McpRuntimeError, type McpPromptDefinition, type McpResourceDefinition, type McpServerCache, type McpServerConfig, type McpServerState, type McpToolDefinition } from "./types.js";
+import { isPlainRecord } from "../utils.js";
 
 // 裸命令名（非路径）在 spawn 时可能因 PATH 继承问题找不到，先用 which 解析成绝对路径。
 function resolveCommand(command: string): string {
