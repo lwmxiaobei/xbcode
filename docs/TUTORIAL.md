@@ -1,4 +1,4 @@
-# 从零构建 Code Agent：与当前 `ts-openai-agent` 实现对齐的教程
+# 从零构建 Code Agent：与当前 `xbcode` 实现对齐的教程
 
 > 这份教程基于当前仓库代码更新，不再引用已经删除的 demo 文件。本文统一以 `src/index.tsx`、`src/agent.ts`、`src/tools.ts`、`src/task-manager.ts`、`src/message-bus.ts`、`src/teammate-manager.ts`、`src/mcp-*.ts` 为准。
 
@@ -896,7 +896,7 @@ export type MailboxMessageType =
 
 ### 配置入口
 
-MCP 配置现在走 `~/.codemini/settings.json`：
+MCP 配置现在走 `~/.xbcode/settings.json`：
 
 ```json
 {

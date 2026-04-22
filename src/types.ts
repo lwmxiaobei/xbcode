@@ -4,6 +4,7 @@ export type ChatMessage = Record<string, unknown>;
 
 export type AgentState = {
   previousResponseId?: string;
+  responseHistory: ResponseInputItem[];
   chatHistory: ChatMessage[];
   turnCount: number;
   launchedAt: number;

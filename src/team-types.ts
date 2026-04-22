@@ -1,4 +1,4 @@
-import type { ChatMessage } from "./types.js";
+import type { ChatMessage, ResponseInputItem } from "./types.js";
 
 export type TeamMemberStatus = "working" | "idle" | "stopped" | "error";
 export type MailboxMessageType = "message" | "broadcast" | "shutdown_request" | "shutdown_response";
@@ -31,6 +31,7 @@ export type TeammateRuntimeState = {
   name: string;
   role: string;
   previousResponseId?: string;
+  responseHistory: ResponseInputItem[];
   chatHistory: ChatMessage[];
   turnCount: number;
   launchedAt: number;

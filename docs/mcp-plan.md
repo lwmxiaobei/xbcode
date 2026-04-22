@@ -1,4 +1,4 @@
-# ts-openai-agent 集成 MCP 协议方案
+# xbcode 集成 MCP 协议方案
 
   ## Summary
 
@@ -15,7 +15,7 @@
 
   ### 1. 配置与启动期加载
 
-  - 扩展 src/config.ts 对 ~/.codemini/settings.json 的读取，新增 mcp 配置段。
+  - 扩展 src/config.ts 对 ~/.xbcode/settings.json 的读取，新增 mcp 配置段。
   - 建议配置结构：
 
   {

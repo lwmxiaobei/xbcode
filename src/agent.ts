@@ -54,6 +54,104 @@ function safeJsonParse(value: string): ToolArgs {
   }
 }
 
+/**
+ * Normalize Responses API input into the explicit list form expected by the
+ * ChatGPT Codex backend.
+ *
+ * Why this exists:
+ * - The public OpenAI Responses API accepts a plain string as shorthand input,
+ *   but `chatgpt.com/backend-api/codex/responses` rejects that shortcut and
+ *   requires `input` to be a list.
+ * - Converting strings into a single user message preserves the original
+ *   behavior while making the request shape compatible with both backends.
+ * - Existing array inputs are forwarded unchanged so tool-call follow-up items
+ *   and previous structured payloads keep their original form.
+ */
+function normalizeResponseInput(inputItems: ResponseInputItem[] | string): ResponseInputItem[] {
+  if (Array.isArray(inputItems)) {
+    return inputItems;
+  }
+
+  return [
+    {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: inputItems,
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * Build a canonical user-message item for stateless Responses replay.
+ *
+ * Why this exists:
+ * - When `previous_response_id` is unavailable we must resend prior turns as an
+ *   explicit input list, so user prompts need one stable shape.
+ * - Keeping the constructor in one place avoids subtle inconsistencies between
+ *   the first request of a turn and follow-up replay requests after tool calls.
+ * - The same shape remains valid for providers that still support the public
+ *   Responses API shorthand.
+ */
+function buildUserResponseMessage(text: string): ResponseInputItem {
+  return {
+    type: "message",
+    role: "user",
+    content: [
+      {
+        type: "input_text",
+        text,
+      },
+    ],
+  };
+}
+
+/**
+ * Deep-clone replay items before reusing them in a later request.
+ *
+ * Why this exists:
+ * - Response output objects come from the SDK and may be mutated elsewhere
+ *   during rendering or debugging.
+ * - Stateless replay should preserve the exact model-visible payload from the
+ *   earlier round, not a shared object that another call could modify.
+ * - JSON cloning is sufficient here because Responses items are plain data.
+ */
+function cloneResponseReplayItem<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * Keep only the output items that are valid and useful for stateless replay.
+ *
+ * Why this exists:
+ * - The ChatGPT Codex backend rejects `previous_response_id`, so later rounds
+ *   must be rebuilt from prior assistant messages and function calls.
+ * - Message and function-call items are enough to reconstruct the model-visible
+ *   assistant state; ephemeral bookkeeping items do not help and may be invalid
+ *   when sent back as input.
+ * - Returning cloned objects lets callers append the items directly into
+ *   `responseHistory` without worrying about shared references.
+ */
+function collectReplayableResponseOutput(output: unknown): ResponseInputItem[] {
+  if (!Array.isArray(output)) {
+    return [];
+  }
+
+  return output
+    .filter((item): item is ResponseInputItem => {
+      if (!item || typeof item !== "object") {
+        return false;
+      }
+      const type = String((item as { type?: unknown }).type ?? "");
+      return type === "message" || type === "function_call";
+    })
+    .map((item) => cloneResponseReplayItem(item));
+}
+
 function extractAssistantText(content: unknown): string {
   if (typeof content === "string") {
     return content;
@@ -192,17 +290,46 @@ async function streamResponse(
   control?: RunControl,
 ): Promise<any> {
   throwIfAborted(control?.signal);
+  const normalizedInstructions = system.trim() || "You are a helpful coding assistant.";
+  const normalizedInput = normalizeResponseInput(inputItems);
 
   const stream = client.responses.stream({
     model,
-    instructions: system,
-    input: inputItems as any,
+    instructions: normalizedInstructions,
+    input: normalizedInput as any,
+    // ChatGPT Codex backend is stricter than the public Responses API.
+    // `sub2api`'s working probe payload explicitly sends `store: false` for the
+    // Codex OAuth path, and the public API also accepts this field, so we set
+    // it unconditionally to keep one compatible request shape for both backends.
+    store: false,
     previous_response_id: previousResponseId,
     tools: tools as any,
   }, control?.signal ? { signal: control.signal } : undefined);
 
   let responseId: string | undefined;
   let assistantText = "";
+  const streamedFunctionCalls = new Map<string, any>();
+
+  /**
+   * ChatGPT Codex stream responses are slightly different from the public
+   * Responses API as surfaced through the OpenAI SDK:
+   * - tool-call items are emitted over SSE events,
+   * - but `stream.finalResponse()` can still return `output: []`.
+   * We therefore key partial function calls by `output_index` and rebuild the
+   * final tool-call list from the stream itself when needed.
+   */
+  const getFunctionCallKey = (event: any, fallbackIndex?: number): string => {
+    if (event?.output_index !== undefined) {
+      return String(event.output_index);
+    }
+    if (event?.item?.call_id) {
+      return String(event.item.call_id);
+    }
+    if (event?.item?.id) {
+      return String(event.item.id);
+    }
+    return String(fallbackIndex ?? streamedFunctionCalls.size);
+  };
 
   try {
     for await (const event of stream as AsyncIterable<any>) {
@@ -217,19 +344,78 @@ async function streamResponse(
         continue;
       }
 
-      if (showThinking && ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"].includes(event.type)) {
-        bridge.appendThinkingDelta(String(event.delta ?? ""));
+      if (event.type === "response.output_item.added" && event.item?.type === "function_call") {
+        const key = getFunctionCallKey(event);
+        streamedFunctionCalls.set(key, {
+          ...cloneResponseReplayItem(event.item),
+          arguments: String(event.item?.arguments ?? ""),
+        });
+        bridge.finalizeStreaming();
         continue;
       }
 
-      if (event.type === "response.output_item.added" && event.item?.type === "function_call") {
-        bridge.finalizeStreaming();
+      if (event.type === "response.function_call_arguments.delta") {
+        const key = getFunctionCallKey(event);
+        const current = streamedFunctionCalls.get(key);
+        if (current) {
+          current.arguments = `${String(current.arguments ?? "")}${String(event.delta ?? "")}`;
+          streamedFunctionCalls.set(key, current);
+        }
+        continue;
+      }
+
+      if (event.type === "response.output_item.done" && event.item?.type === "function_call") {
+        const key = getFunctionCallKey(event);
+        const current = streamedFunctionCalls.get(key) ?? {};
+        streamedFunctionCalls.set(key, {
+          ...current,
+          ...cloneResponseReplayItem(event.item),
+          arguments: String(event.item?.arguments ?? current.arguments ?? ""),
+        });
+        continue;
+      }
+
+      if (showThinking && ["response.reasoning_summary_text.delta", "response.reasoning_text.delta"].includes(event.type)) {
+        bridge.appendThinkingDelta(String(event.delta ?? ""));
+        continue;
       }
     }
 
     const response = await stream.finalResponse();
     bridge.finalizeStreaming();
-    return response;
+    const sdkOutput = Array.isArray(response.output) ? response.output : [];
+
+    /**
+     * Preserve SDK output when present, but patch in a synthetic fallback for
+     * Codex OAuth streams whose final response omits the items we already saw on
+     * the wire.
+     */
+    if (sdkOutput.length > 0) {
+      return response;
+    }
+
+    const rebuiltOutput: any[] = [];
+    if (assistantText) {
+      rebuiltOutput.push({
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: assistantText,
+          },
+        ],
+      });
+    }
+
+    for (const item of streamedFunctionCalls.values()) {
+      rebuiltOutput.push(item);
+    }
+
+    return {
+      ...response,
+      output: rebuiltOutput,
+    };
   } catch (error) {
     bridge.finalizeStreaming();
     if (error instanceof APIUserAbortError || control?.signal?.aborted) {
@@ -670,13 +856,20 @@ async function agentLoop(
   tools: readonly any[] = TOOLS,
   control?: RunControl,
 ): Promise<string | undefined> {
-  let nextInput: ResponseInputItem[] | string = [
-    {
-      role: "user",
-      content: [{ type: "input_text", text: query }],
-    },
-  ];
-  let currentResponseId = previousResponseId;
+  /**
+   * Most Responses providers support `previous_response_id`, so they can keep
+   * server-side state and only receive the latest delta. ChatGPT Codex OAuth
+   * does not support that parameter, so in that one branch we replay the local
+   * conversation transcript on every round instead.
+   */
+  const usesStatelessReplay = !config.supportsPreviousResponseId;
+  const replayHistory = usesStatelessReplay
+    ? [...state.responseHistory.map((item) => cloneResponseReplayItem(item)), buildUserResponseMessage(query)]
+    : [];
+  let nextInput: ResponseInputItem[] | string = usesStatelessReplay
+    ? replayHistory
+    : [buildUserResponseMessage(query)];
+  let currentResponseId = usesStatelessReplay ? undefined : previousResponseId;
 
   while (true) {
     throwIfAborted(control?.signal);
@@ -694,11 +887,18 @@ async function agentLoop(
     );
     currentResponseId = response.id;
 
+    if (usesStatelessReplay) {
+      replayHistory.push(...collectReplayableResponseOutput(response.output));
+    }
+
     const toolCalls = Array.isArray(response.output)
       ? response.output.filter((item: any) => item.type === "function_call")
       : [];
 
     if (toolCalls.length === 0) {
+      if (usesStatelessReplay) {
+        state.responseHistory = replayHistory.map((item) => cloneResponseReplayItem(item));
+      }
       return currentResponseId;
     }
 
@@ -719,7 +919,13 @@ async function agentLoop(
       }
     }
 
-    nextInput = results;
+    if (usesStatelessReplay) {
+      replayHistory.push(...results.map((item) => cloneResponseReplayItem(item)));
+      nextInput = replayHistory;
+      currentResponseId = undefined;
+    } else {
+      nextInput = results;
+    }
   }
 }
 
@@ -873,6 +1079,7 @@ export type AgentConfig = {
   system: string;
   showThinking: boolean;
   apiMode: "responses" | "chat-completions";
+  supportsPreviousResponseId: boolean;
 };
 
 export async function runAgentTurn(

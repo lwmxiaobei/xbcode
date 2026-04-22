@@ -34,7 +34,7 @@
 MCP 相关代码主要分布在这几层：
 
 - `src/config.ts`
-  - 读取 `~/.codemini/settings.json`
+  - 读取 `~/.xbcode/settings.json`
   - 校验和归一化 `mcp.servers`
 - `src/mcp/types.ts`
   - MCP 运行时的核心类型和错误类型
@@ -68,7 +68,7 @@ LLM / agent loop
 
 MCP 配置统一来自：
 
-- `~/.codemini/settings.json`
+- `~/.xbcode/settings.json`
 
 结构位于：
 
@@ -676,7 +676,7 @@ resources:
 
 建议按这个顺序排查：
 
-1. `~/.codemini/settings.json` 是否真的是当前程序读的文件
+1. `~/.xbcode/settings.json` 是否真的是当前程序读的文件
 2. `mcp.servers` 是否存在
 3. `cwd` 是否存在
 4. `command` 是否可执行

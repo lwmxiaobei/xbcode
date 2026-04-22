@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const CONFIG_DIR = path.join(os.homedir(), ".codemini");
+const CONFIG_DIR = path.join(os.homedir(), ".xbcode");
 const SETTINGS_PATH = path.join(CONFIG_DIR, "settings.json");
 
 if (fs.existsSync(SETTINGS_PATH)) {
@@ -27,4 +27,4 @@ const defaultSettings = {
 fs.mkdirSync(CONFIG_DIR, { recursive: true });
 fs.writeFileSync(SETTINGS_PATH, JSON.stringify(defaultSettings, null, 2) + "\n", "utf8");
 
-console.log(`[codemini] Created default config at ${SETTINGS_PATH}`);
+console.log(`[xbcode] Created default config at ${SETTINGS_PATH}`);

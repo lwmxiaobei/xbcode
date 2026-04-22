@@ -99,6 +99,7 @@ export class TeammateManager {
     return {
       name,
       role,
+      responseHistory: [],
       chatHistory: [],
       turnCount: 0,
       launchedAt: Date.now(),

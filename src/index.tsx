@@ -16,10 +16,39 @@ import { useEffect, useRef, useState } from "react";
 import wrapAnsi from "wrap-ansi";
 
 import { isTurnInterruptedError, runAgentTurn, type AgentConfig } from "./agent.js";
-import { resolveConfig, getProviderNames, getProviderModels, loadSettings, reloadSettings, getSettingsPath, normalizeModelEntry, type ResolvedConfig } from "./config.js";
+import {
+  clearProviderCredentials,
+  getCredentialsPath,
+  getProviderModels,
+  getProviderNames,
+  getSettingsPath,
+  loadCredentialsFile,
+  loadSettings,
+  normalizeModelEntry,
+  reloadSettings,
+  resolveConfig,
+  resolveProviderAuthState,
+  resolveRuntimeAuth,
+  writeCredentialsFile,
+  updateProviderModels,
+  type ProviderAuthState,
+  type ResolvedConfig,
+  type StoredOAuthCredentials,
+} from "./config.js";
 import { estimateTokens, autoCompact } from "./compact.js";
+import { normalizeCommand } from "./commands.js";
+import { createSubmitDeduper, getSubmittedValueFromInput } from "./input-submit.js";
 import { formatMailboxMessages, renderInboxPrompt } from "./message-bus.js";
 import { ensureMcpInitialized, getMcpPromptInstructions, mcpManager, primeMcpRuntime, refreshMcpFromSettings } from "./mcp/runtime.js";
+import {
+  OPENAI_CODEX_BASE_URL,
+  createOpenAIOAuthFetch,
+  getOpenAIOAuthDefaultHeaders,
+  listAvailableModels,
+  refreshAccessToken,
+  startOpenAILogin,
+} from "./oauth/openai.js";
+import { buildSystemPrompt } from "./prompt.js";
 import { skillLoader, messageBus, teammateManager } from "./tools.js";
 import type { AgentState, DiffLine, UiBridge, UiMessage } from "./types.js";
 import { ellipsize } from "./utils.js";
@@ -30,40 +59,77 @@ loadDotenv({ path: path.join(PROJECT_ROOT, ".env"), override: true });
 
 const WORKDIR = process.cwd();
 
-function buildSystemPrompt(): string {
-  const SKILL_DESCRIPTIONS = skillLoader.getDescriptions();
-  const mcpSummary = getMcpPromptInstructions();
-  return `You are a coding agent at ${WORKDIR}. Use tools to solve tasks. Act, don't explain.
-Use load_skill to access specialized knowledge before tackling unfamiliar topics.
-
-Skills available:
-${SKILL_DESCRIPTIONS}
-
-${mcpSummary}`;
-}
-
-function createAgentConfig(resolved: ResolvedConfig): AgentConfig {
-  const client = new OpenAI({
-    apiKey: resolved.apiKey || undefined,
-    baseURL: resolved.baseURL !== "https://api.openai.com/v1" ? resolved.baseURL : undefined,
-  });
+function createAgentConfig(resolved: ResolvedConfig, authState?: ProviderAuthState): AgentConfig {
+  const bearerToken = authState?.bearerToken || resolved.apiKey || undefined;
+  const isOpenAIOAuth = resolved.providerName === "openai" && authState?.authMode === "oauth" && authState.oauth;
+  /**
+   * OpenAI OAuth tokens issued by the Codex login flow do not carry the public
+   * API scopes required by `api.openai.com/v1/responses`. They are instead meant
+   * for ChatGPT's internal Codex backend, so OAuth sessions must use that base
+   * URL and header set while API-key sessions keep using the public OpenAI API.
+   */
+  const clientOptions = isOpenAIOAuth
+    ? {
+        apiKey: bearerToken,
+        baseURL: OPENAI_CODEX_BASE_URL,
+        defaultHeaders: getOpenAIOAuthDefaultHeaders(authState.oauth as StoredOAuthCredentials),
+        fetch: createOpenAIOAuthFetch(),
+      }
+    : {
+        apiKey: bearerToken,
+        baseURL: resolved.baseURL !== "https://api.openai.com/v1" ? resolved.baseURL : undefined,
+      };
+  const client = new OpenAI(clientOptions);
   return {
     client,
     model: resolved.model,
-    system: buildSystemPrompt(),
+    system: buildSystemPrompt({
+      workdir: WORKDIR,
+      skillDescriptions: skillLoader.getDescriptions(),
+      mcpInstructions: getMcpPromptInstructions(),
+    }),
     showThinking: resolved.showThinking,
     apiMode: resolved.apiMode,
+    // ChatGPT Codex backend rejects `previous_response_id`, so only this
+    // OAuth-backed branch needs stateless replay. All other providers keep the
+    // original server-side Responses chaining behavior.
+    supportsPreviousResponseId: !isOpenAIOAuth,
   };
 }
 
 // Initialized lazily after user selects model (or immediately if MODEL_ID env var is set)
 let currentResolved: ResolvedConfig = undefined!;
 let agentConfig: AgentConfig = undefined!;
+let currentAuthState: ProviderAuthState | undefined;
 
 function ensureConfig(providerName?: string, modelName?: string): void {
   currentResolved = resolveConfig(providerName, modelName);
-  agentConfig = createAgentConfig(currentResolved);
+  currentAuthState = resolveProviderAuthState(loadSettings(), currentResolved.providerName, loadCredentialsFile(getCredentialsPath()));
+  agentConfig = createAgentConfig(currentResolved, currentAuthState);
   primeMcpRuntime();
+}
+
+async function refreshCurrentAuth(): Promise<void> {
+  if (!currentResolved) {
+    return;
+  }
+
+  const settings = loadSettings();
+  const result = await resolveRuntimeAuth({
+    settings,
+    providerName: currentResolved.providerName,
+    credentials: loadCredentialsFile(getCredentialsPath()),
+    refreshOAuthToken: async (credentials) => await refreshAccessToken({
+      clientId: credentials.client_id,
+      refreshToken: credentials.refresh_token ?? "",
+    }),
+    onCredentialsUpdated: async (credentials) => {
+      await writeCredentialsFile(getCredentialsPath(), credentials);
+    },
+  });
+
+  currentAuthState = result.state;
+  agentConfig = createAgentConfig(currentResolved, currentAuthState);
 }
 
 // If MODEL_ID env var is set, initialize immediately (skip interactive selection)
@@ -118,9 +184,37 @@ type SlashCommand = {
   description: string;
 };
 
+type SkillSlashInvocation = {
+  command: string;
+  args?: string;
+};
+
+/**
+ * Estimate the active conversation footprint for the current API mode.
+ *
+ * Why this exists:
+ * - `chat-completions` keeps its full transcript in `chatHistory`, while the
+ *   Codex OAuth fallback now keeps replayable Responses items in
+ *   `responseHistory`.
+ * - Reusing one helper keeps status and debug output honest without changing
+ *   how other providers account for context.
+ * - The estimate remains intentionally rough; it only needs to show whether
+ *   context is growing, not provide billing-grade numbers.
+ */
+function estimateActiveContextTokens(state: AgentState): number {
+  if (currentResolved?.apiMode === "responses") {
+    return estimateTokens(state.responseHistory as any);
+  }
+  return estimateTokens(state.chatHistory);
+}
+
+const MAX_VISIBLE_SLASH_MATCHES = 8;
+
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/help", description: "show available commands" },
   { command: "/status", description: "show session status" },
+  { command: "/login", description: "start oauth login for the current provider" },
+  { command: "/logout", description: "clear oauth credentials for the current provider" },
   { command: "/mcp", description: "show MCP server status" },
   { command: "/mcp refresh", description: "refresh MCP caches and reconnect servers" },
   { command: "/team", description: "show teammate statuses" },
@@ -131,6 +225,32 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/new", description: "clear context and start a new conversation" },
   { command: "/exit", description: "exit the CLI" },
 ];
+
+function getSkillSlashCommands(): SlashCommand[] {
+  const limit = 30;
+  return skillLoader.getPromptCommands().map((command) => ({
+    command: `/${command.name}`,
+    description: command.description.length > limit
+      ? `${command.description.slice(0, limit)}...`
+      : command.description,
+  }));
+}
+
+function getAllSlashCommands(): SlashCommand[] {
+  const commands = new Map<string, SlashCommand>();
+
+  for (const command of SLASH_COMMANDS) {
+    commands.set(command.command, command);
+  }
+
+  for (const command of getSkillSlashCommands()) {
+    if (!commands.has(command.command)) {
+      commands.set(command.command, command);
+    }
+  }
+
+  return [...commands.values()].sort((left, right) => left.command.localeCompare(right.command));
+}
 
 const MOUSE_INPUT_SEQUENCE_RE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 
@@ -350,6 +470,26 @@ function configMessage(): UiMessage {
   };
 }
 
+function formatAuthSummary(state?: ProviderAuthState): string {
+  if (!state) {
+    return "auth none";
+  }
+  if (state.authMode === "oauth") {
+    const email = state.oauth?.email?.trim();
+    if (email) {
+      return `auth oauth(${email})`;
+    }
+    return "auth oauth";
+  }
+  if (state.authMode === "apiKey") {
+    if (state.oauth?.refresh_token?.trim()) {
+      return "auth apiKey (oauth fallback available)";
+    }
+    return "auth apiKey";
+  }
+  return "auth none";
+}
+
 function headerItem(): UiMessage {
   return {
     id: "header",
@@ -388,7 +528,7 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
       paddingY={0}
     >
       <Box justifyContent="space-between">
-        <Text bold color="red">Claude Code Mini</Text>
+        <Text bold color="red">xbcode</Text>
         <Text color="gray">v2.1.80</Text>
       </Box>
       <Box marginTop={1}>
@@ -434,6 +574,10 @@ function StatusBar({ width, busy, state, scrollOffset }: { width: number; busy: 
 function helpMessage(): string {
   const providers = getProviderNames();
   const providerList = providers.length > 0 ? providers.join(", ") : "(none configured)";
+  const skillCommands = skillLoader.getPromptCommands();
+  const skillsLine = skillCommands.length > 0
+    ? `skills     /${skillCommands.slice(0, 8).map((command) => command.name).join(", /")}${skillCommands.length > 8 ? ", ..." : ""}`
+    : "skills     (none available)";
   return [
     "help                show available commands",
     "status              show session status",
@@ -445,6 +589,7 @@ function helpMessage(): string {
     "compact             compact conversation history to free context space",
     "new                 clear context and start a new conversation",
     "exit                exit the CLI",
+    skillsLine,
     "",
     `config     ${getSettingsPath()}`,
     `providers  ${providerList}`,
@@ -468,8 +613,9 @@ function sessionStatus(state: AgentState): string {
     modelsLine,
     `api mode ${currentResolved.apiMode}`,
     `baseURL  ${currentResolved.baseURL}`,
+    formatAuthSummary(currentAuthState),
     `turns    ${state.turnCount}`,
-    `context  ~${estimateTokens(state.chatHistory)} tokens | compacted: ${state.compactCount} times`,
+    `context  ~${estimateActiveContextTokens(state)} tokens | compacted: ${state.compactCount} times`,
     `mcp      ${mcpSummary.connected} connected | ${mcpSummary.degraded} degraded | ${mcpSummary.disconnected} disconnected | ${mcpSummary.enabled} enabled`,
     `team     ${teammateManager.listMembers().length} teammates | lead inbox: ${messageBus.inboxSize("lead")}`,
     `uptime   ${formatDuration(Date.now() - state.launchedAt)}`,
@@ -487,41 +633,62 @@ function findSlashCommandMatches(inputValue: string): SlashCommand[] {
 
   const query = inputValue.trim().toLowerCase();
   if (query === "/") {
-    return SLASH_COMMANDS;
+    return getAllSlashCommands();
   }
 
-  return SLASH_COMMANDS.filter(({ command }) => command.startsWith(query));
+  return getAllSlashCommands().filter(({ command }) => command.startsWith(query));
 }
 
-function normalizeCommand(inputValue: string): string | null {
-  const trimmed = inputValue.trim().toLowerCase();
-  if (!trimmed) {
+function parseSkillSlashInvocation(inputValue: string): SkillSlashInvocation | null {
+  const trimmed = inputValue.trim();
+  if (!trimmed.startsWith("/")) {
     return null;
   }
 
-  const withoutSlash = trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
-
-  const parts = withoutSlash.split(/\s+/);
-  const cmd = parts[0];
-
-  switch (cmd) {
-    case "help":
-    case "status":
-    case "mcp":
-    case "team":
-    case "inbox":
-    case "compact":
-    case "new":
-    case "exit":
-      return withoutSlash;
-    case "provider":
-    case "model":
-      return withoutSlash;
-    case "quit":
-      return "exit";
-    default:
-      return null;
+  const withoutSlash = trimmed.slice(1).trim();
+  if (!withoutSlash) {
+    return null;
   }
+
+  const firstSpaceIndex = withoutSlash.search(/\s/);
+  const commandName = (firstSpaceIndex === -1 ? withoutSlash : withoutSlash.slice(0, firstSpaceIndex)).trim();
+  if (!commandName || !skillLoader.getCommand(commandName)) {
+    return null;
+  }
+
+  const args = firstSpaceIndex === -1 ? "" : withoutSlash.slice(firstSpaceIndex + 1).trim();
+  return {
+    command: commandName,
+    args: args || undefined,
+  };
+}
+
+function getVisibleSlashMatches(matches: SlashCommand[], selectedIndex: number): {
+  items: SlashCommand[];
+  start: number;
+  hiddenAbove: number;
+  hiddenBelow: number;
+} {
+  if (matches.length <= MAX_VISIBLE_SLASH_MATCHES) {
+    return {
+      items: matches,
+      start: 0,
+      hiddenAbove: 0,
+      hiddenBelow: 0,
+    };
+  }
+
+  const maxStart = Math.max(0, matches.length - MAX_VISIBLE_SLASH_MATCHES);
+  const idealStart = selectedIndex - Math.floor(MAX_VISIBLE_SLASH_MATCHES / 2);
+  const start = Math.max(0, Math.min(maxStart, idealStart));
+  const end = Math.min(matches.length, start + MAX_VISIBLE_SLASH_MATCHES);
+
+  return {
+    items: matches.slice(start, end),
+    start,
+    hiddenAbove: start,
+    hiddenBelow: matches.length - end,
+  };
 }
 
 function buildMessageRows(message: UiMessage, width: number): ViewportRow[] {
@@ -725,12 +892,15 @@ function CliApp() {
   const assistantMessageIdRef = useRef<string | undefined>(undefined);
   const thinkingMessageIdRef = useRef<string | undefined>(undefined);
   const skipSubmitRef = useRef(false);
+  const submitDeduperRef = useRef(createSubmitDeduper());
+  const loginInFlightRef = useRef(false);
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
   const startupMcpReportShownRef = useRef(false);
   const maxScrollOffsetRef = useRef(0);
   const pageScrollSizeRef = useRef(10);
   const agentStateRef = useRef<AgentState>({
+    responseHistory: [],
     chatHistory: [],
     turnCount: 0,
     launchedAt: Date.now(),
@@ -741,10 +911,24 @@ function CliApp() {
   const slashMatches = findSlashCommandMatches(inputValue);
   const showSlashMenu = trusted === true && !busy && slashMatches.length > 0;
   const activeSlashIndex = Math.min(slashSelection, Math.max(0, slashMatches.length - 1));
+  const visibleSlashMenu = getVisibleSlashMatches(slashMatches, activeSlashIndex);
 
   useEffect(() => {
     setSlashSelection(0);
   }, [inputValue]);
+
+  const requestExit = () => {
+    /**
+     * 这里只依赖 Ink 的 exit() 不够稳妥：
+     * 它会卸载界面，但如果事件循环里还残留句柄，Node 进程可能继续存活，
+     * 用户就会看到 `/exit` 像是“没反应”。因此这里先走正常卸载，
+     * 再在下一个 tick 强制结束进程，确保命令语义就是立即退出。
+     */
+    exit();
+    setImmediate(() => {
+      process.exit(0);
+    });
+  };
 
   const clampScrollOffset = (value: number): number => Math.max(0, Math.min(maxScrollOffsetRef.current, value));
   const scrollHistoryBy = (delta: number) => {
@@ -846,6 +1030,7 @@ function CliApp() {
     thinkingMessageIdRef.current = undefined;
     scrollHistoryToLatest();
     agentStateRef.current = {
+      responseHistory: [],
       chatHistory: [],
       turnCount: 0,
       launchedAt: Date.now(),
@@ -923,7 +1108,7 @@ function CliApp() {
       if (trustSelection === 0) {
         acceptTrust();
       } else {
-        exit();
+        requestExit();
       }
       return;
     }
@@ -934,7 +1119,7 @@ function CliApp() {
     }
 
     if (["2", "n", "N", "q", "Q"].includes(input)) {
-      exit();
+      requestExit();
     }
   };
 
@@ -945,9 +1130,10 @@ function CliApp() {
     }
 
     const command = normalizeCommand(trimmed);
+    const skillSlashInvocation = command ? null : parseSkillSlashInvocation(trimmed);
 
     if (["q", "exit"].includes(trimmed.toLowerCase()) || command === "exit") {
-      exit();
+      requestExit();
       return;
     }
 
@@ -959,6 +1145,7 @@ function CliApp() {
 
       if (command === "status") {
         await ensureMcpInitialized();
+        await refreshCurrentAuth();
         pushMessage("system", sessionStatus(agentStateRef.current), "status");
         return;
       }
@@ -975,7 +1162,7 @@ function CliApp() {
 
           if (mcpArgs === "refresh") {
             await refreshMcpFromSettings();
-            agentConfig = createAgentConfig(currentResolved);
+            agentConfig = createAgentConfig(currentResolved, currentAuthState);
             pushMessage("system", mcpManager.formatStatusReport(), "mcp");
             return;
           }
@@ -987,7 +1174,7 @@ function CliApp() {
               return;
             }
             await refreshMcpFromSettings(serverName);
-            agentConfig = createAgentConfig(currentResolved);
+            agentConfig = createAgentConfig(currentResolved, currentAuthState);
             pushMessage("system", mcpManager.formatStatusReport(), "mcp");
             return;
           }
@@ -1028,6 +1215,7 @@ function CliApp() {
           pushMessage("system", `Compacted: ~${before} → ~${after} tokens`, "compact");
         } else {
           state.previousResponseId = undefined;
+          state.responseHistory = [];
           state.compactCount += 1;
           pushMessage("system", "Responses API context chain reset.", "compact");
         }
@@ -1059,7 +1247,8 @@ function CliApp() {
         }
 
         currentResolved = resolveConfig(providerArg);
-        agentConfig = createAgentConfig(currentResolved);
+        currentAuthState = resolveProviderAuthState(loadSettings(), currentResolved.providerName, loadCredentialsFile(getCredentialsPath()));
+        agentConfig = createAgentConfig(currentResolved, currentAuthState);
         setUserHasChosenModel(true);
         pushMessage("system", `Switched to provider "${providerArg}"\nmodel=${currentResolved.model} models=[${currentResolved.availableModels.join(", ")}]`, "provider");
         return;
@@ -1091,9 +1280,136 @@ function CliApp() {
         pushMessage("system", `Switched to model "${match.displayName}" (provider: ${match.provider})`, "model");
         return;
       }
+
+      if (command.startsWith("login")) {
+        const providerArg = command.slice(5).trim() || currentResolved.providerName;
+        const settings = loadSettings();
+        const provider = settings.providers[providerArg];
+        if (!provider) {
+          pushMessage("error", `Unknown provider: "${providerArg}"`, "login");
+          return;
+        }
+        if (providerArg !== "openai" || provider.auth?.type !== "oauth") {
+          pushMessage("error", `Provider "${providerArg}" is not configured for OAuth.`, "login");
+          return;
+        }
+        /**
+         * OAuth login relies on a single in-memory state value for the current
+         * browser round-trip. If `/login` is triggered twice before the first
+         * callback returns, the second invocation replaces the expected state and
+         * the first browser redirect is rejected as a mismatch. This guard keeps
+         * the CSRF check intact while preventing overlapping login attempts.
+         */
+        if (loginInFlightRef.current) {
+          pushMessage("system", "OpenAI OAuth login is already in progress.", "login");
+          return;
+        }
+
+        pushMessage("system", "Starting OpenAI OAuth login. A browser URL will be shown below.", "login");
+        loginInFlightRef.current = true;
+        try {
+          const result = await startOpenAILogin({
+            openUrl: (url) => {
+              pushMessage("system", `Open this URL to continue login:\n${url}`, "login");
+            },
+          });
+
+          const credentials = loadCredentialsFile(getCredentialsPath());
+          await writeCredentialsFile(getCredentialsPath(), {
+            providers: {
+              ...credentials.providers,
+              [providerArg]: {
+                ...result.credentials,
+                email: credentials.providers[providerArg]?.email,
+              },
+            },
+          });
+
+          ensureConfig(providerArg, currentResolved.model);
+          let syncedModelCount = 0;
+          try {
+            const discoveredModels = await listAvailableModels({
+              accessToken: result.credentials.access_token ?? "",
+              baseURL: provider.baseURL,
+            });
+            if (discoveredModels.length > 0) {
+              await updateProviderModels(getSettingsPath(), providerArg, discoveredModels);
+              reloadSettings();
+              const nextModel = discoveredModels.includes(currentResolved.model)
+                ? currentResolved.model
+                : (discoveredModels[0] ?? currentResolved.model);
+              ensureConfig(providerArg, nextModel);
+              syncedModelCount = discoveredModels.length;
+            }
+          } catch (error) {
+            /**
+             * Model sync is a post-login convenience step. Failing it should not
+             * discard a valid OAuth session, so we surface the error separately
+             * and keep the successful login result.
+             */
+            pushMessage("system", `OAuth login succeeded, but model sync failed: ${error instanceof Error ? error.message : String(error)}`, "login");
+          }
+
+          pushMessage(
+            "system",
+            syncedModelCount > 0
+              ? `Logged in to "${providerArg}" with OAuth. Synced ${syncedModelCount} models.`
+              : `Logged in to "${providerArg}" with OAuth.`,
+            "login",
+          );
+        } finally {
+          loginInFlightRef.current = false;
+        }
+        return;
+      }
+
+      if (command.startsWith("logout")) {
+        const providerArg = command.slice(6).trim() || currentResolved.providerName;
+        await clearProviderCredentials(getCredentialsPath(), providerArg);
+        ensureConfig(providerArg, currentResolved.model);
+        pushMessage("system", `Cleared OAuth credentials for "${providerArg}".`, "logout");
+        return;
+      }
     }
 
     if (trimmed.startsWith("/")) {
+      if (skillSlashInvocation) {
+        pushMessage("user", trimmed);
+        scrollHistoryToLatest();
+        setBusy(true);
+        stopRequestedRef.current = false;
+        const abortController = new AbortController();
+        activeTurnAbortRef.current = abortController;
+
+        try {
+          await ensureMcpInitialized();
+          await refreshCurrentAuth();
+          await runAgentTurn(
+            agentConfig,
+            skillLoader.renderSkill(skillSlashInvocation.command, skillSlashInvocation.args),
+            agentStateRef.current,
+            bridge,
+            { signal: abortController.signal },
+          );
+        } catch (error) {
+          finalizeStreaming();
+          if (isTurnInterruptedError(error)) {
+            const stopMessage = agentConfig.apiMode === "responses" && !error.responseId
+              ? "Stopped current turn. Prior session context was kept. Resend the interrupted prompt if you want to continue it."
+              : "Stopped current turn. Session context preserved.";
+            pushMessage("system", stopMessage, "stop");
+          } else {
+            pushMessage("error", error instanceof Error ? error.message : String(error), "error");
+          }
+        } finally {
+          finalizeStreaming();
+          activeTurnAbortRef.current = null;
+          stopRequestedRef.current = false;
+          setBusy(false);
+        }
+        return;
+      }
+
       pushMessage("error", `Unknown command: ${trimmed}. Try help or /help`, "error");
       return;
     }
@@ -1107,7 +1423,7 @@ function CliApp() {
 
     try {
       await ensureMcpInitialized();
-      agentConfig = createAgentConfig(currentResolved);
+      await refreshCurrentAuth();
 
       const leadInbox = messageBus.drainInbox("lead");
       if (leadInbox.length > 0) {
@@ -1139,7 +1455,7 @@ function CliApp() {
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
-      exit();
+      requestExit();
       return;
     }
 
@@ -1210,6 +1526,12 @@ function CliApp() {
       return;
     }
 
+    const submittedValue = getSubmittedValueFromInput(inputValue, input, key.return);
+    if (submittedValue !== null) {
+      handleSubmit(submittedValue);
+      return;
+    }
+
     if (showSlashMenu) {
       if (key.escape) {
         setInputValue("");
@@ -1243,9 +1565,16 @@ function CliApp() {
         return;
       }
     }
+
   });
 
   const handleSubmit = (value: string) => {
+    // Enter 可能同时从 TextInput 和父级 useInput 两条路径冒出来。
+    // 这里统一做去重，避免兜底提交把同一条输入执行两次。
+    if (!submitDeduperRef.current.shouldSubmit(value)) {
+      return;
+    }
+
     if (showSlashMenu) {
       const selectedCommand = slashMatches[activeSlashIndex]?.command ?? value;
       setInputValue("");
@@ -1271,7 +1600,10 @@ function CliApp() {
   const showTrustPrompt = trusted === null;
   const showModelSelect = !showTrustPrompt && !modelSelected;
   const showMainUi = !showTrustPrompt && modelSelected;
-  const reservedLines = 18 + (busy ? 1 : 0) + (showSlashMenu ? slashMatches.length + 1 : 0);
+  const slashMenuLines = showSlashMenu
+    ? visibleSlashMenu.items.length + (visibleSlashMenu.hiddenAbove > 0 ? 1 : 0) + (visibleSlashMenu.hiddenBelow > 0 ? 1 : 0)
+    : 0;
+  const reservedLines = 18 + (busy ? 1 : 0) + slashMenuLines;
   const availableMessageLines = Math.max(1, terminalSize.rows - reservedLines);
   const { rows: visibleRows, maxScrollOffset, effectiveScrollOffset } = selectVisibleRows(viewportRows, availableMessageLines, scrollOffset);
 
@@ -1347,7 +1679,7 @@ function CliApp() {
         <>
           <Box flexDirection="column" marginBottom={1}>
             <Text color="blue" wrap="truncate">{borderRule(innerWidth)}</Text>
-            <Text color="blue">Claude Code Mini <Text color="gray">Code Agent CLI</Text></Text>
+            <Text color="blue">xbcode <Text color="gray">CLI</Text></Text>
             <Text color="gray" wrap="truncate">workspace {WORKDIR}</Text>
             <Text color="blue" wrap="truncate">{borderRule(innerWidth)}</Text>
           </Box>
@@ -1385,8 +1717,12 @@ function CliApp() {
             </Box>
             {showSlashMenu ? (
               <Box flexDirection="column" marginTop={1}>
-                {slashMatches.map(({ command, description }, index) => {
-                  const selected = index === activeSlashIndex;
+                {visibleSlashMenu.hiddenAbove > 0 ? (
+                  <Text color="gray">  ↑ {visibleSlashMenu.hiddenAbove} more</Text>
+                ) : null}
+                {visibleSlashMenu.items.map(({ command, description }, index) => {
+                  const absoluteIndex = visibleSlashMenu.start + index;
+                  const selected = absoluteIndex === activeSlashIndex;
 
                   return (
                     <Box key={command}>
@@ -1398,6 +1734,9 @@ function CliApp() {
                     </Box>
                   );
                 })}
+                {visibleSlashMenu.hiddenBelow > 0 ? (
+                  <Text color="gray">  ↓ {visibleSlashMenu.hiddenBelow} more</Text>
+                ) : null}
               </Box>
             ) : null}
             <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
@@ -1413,3 +1752,9 @@ function CliApp() {
 
 const app = render(<CliApp />, { exitOnCtrlC: false });
 await app.waitUntilExit();
+/**
+ * Ink 的 exit() 只保证卸载 TUI，不保证 Node 进程一定结束。
+ * 这个 CLI 在退出后仍可能保留活跃句柄（例如底层流、计时器或连接），
+ * 导致界面看起来“没退出”。这里显式结束进程，确保 `/exit` 的行为稳定符合预期。
+ */
+process.exit(0);
