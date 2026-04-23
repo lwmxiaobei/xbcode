@@ -4,6 +4,24 @@
   "private": false,
   "description": "xbcode CLI agent",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lwmxiaobei/agent-mini.git"
+  },
+  "homepage": "https://github.com/lwmxiaobei/agent-mini#readme",
+  "bugs": {
+    "url": "https://github.com/lwmxiaobei/agent-mini/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "ai",
+    "mcp"
+  ],
   "bin": {
     "xbcode": "./dist/index.js"
   },
@@ -13,7 +31,10 @@
   "files": [
     "dist",
     "scripts",
-    "skills"
+    "skills",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
   ],
   "scripts": {
     "dev": "tsx src/index.tsx",

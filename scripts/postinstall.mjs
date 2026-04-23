@@ -14,7 +14,7 @@ if (fs.existsSync(SETTINGS_PATH)) {
 const defaultSettings = {
   providers: {
     openai: {
-      models: ["gpt-4.1", "gpt-4.1-mini", "o3-mini"],
+      models: ["gpt-5.4", "gpt-5.3-codex"],
       apiKey: "",
       baseURL: "https://api.openai.com/v1",
       apiMode: "responses",

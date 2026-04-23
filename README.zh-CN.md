@@ -280,13 +280,15 @@ teammate 只能访问受限工具集：
 
 技能加载顺序如下：
 
-- 全局技能目录：`~/.claude/skills`
+- 全局技能目录（优先）：`~/.xbcode/skills`
+- 全局技能目录（兼容 Claude）：`~/.claude/skills`
 - 仓库本地技能目录：`<workdir>/skills`
 
 规则是：
 
-- 全局技能先加载
-- 本地技能可以覆盖同名全局技能
+- `~/.xbcode/skills` 先加载
+- `~/.claude/skills` 随后加载以保持兼容
+- 本地技能最后加载，并可以覆盖同名全局技能
 
 每个技能都由一个 `SKILL.md` 描述，支持 frontmatter。加载后可用于：
 

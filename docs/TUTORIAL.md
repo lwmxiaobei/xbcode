@@ -468,13 +468,16 @@ export const TASK_TOOL = {
 
 ### 加载顺序
 
-技能来源有两层：
+技能来源有三层：
 
-1. 全局技能目录
+1. 全局技能目录（优先）
+   `~/.xbcode/skills`
+2. 全局技能目录（兼容 Claude）
    `~/.claude/skills`
-2. 当前仓库本地技能目录
+3. 当前仓库本地技能目录
    `./skills`
 
+加载顺序是：`~/.xbcode/skills` -> `~/.claude/skills` -> `./skills`。
 后加载的本地技能会覆盖同名全局技能。
 
 ### `SkillLoader` 的职责

@@ -286,15 +286,17 @@ When a task is marked `completed`, dependent tasks are automatically unblocked.
 
 ### Skills
 
-Skills provide reusable instructions and domain-specific guidance. They are loaded from two locations:
+Skills provide reusable instructions and domain-specific guidance. They are loaded from three locations:
 
-- Global: `~/.claude/skills`
+- Global (preferred): `~/.xbcode/skills`
+- Global (Claude-compatible): `~/.claude/skills`
 - Local: `<workdir>/skills`
 
 Loading order matters:
 
-- Global skills are loaded first
-- Local skills override global skills with the same `name`
+- `~/.xbcode/skills` is loaded first
+- `~/.claude/skills` is loaded next for compatibility
+- Local skills are loaded last and override global skills with the same `name`
 
 Each skill is defined by a `SKILL.md` file with frontmatter. The loader exposes:
 

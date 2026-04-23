@@ -3,6 +3,7 @@
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
 
 import { config as loadDotenv } from "dotenv";
 import fs from "node:fs";
@@ -13,6 +14,8 @@ import { markedTerminal } from "marked-terminal";
 import OpenAI from "openai";
 import { useEffect, useRef, useState } from "react";
 import wrapAnsi from "wrap-ansi";
+
+import pkg from "../package.json" with { type: "json" };
 
 import { isTurnInterruptedError, runAgentTurn, type AgentConfig } from "./agent.js";
 import {
@@ -221,11 +224,14 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/inbox", description: "drain lead inbox" },
   { command: "/provider", description: "switch provider" },
   { command: "/model", description: "switch model within current provider" },
+  { command: "/mouse", description: "toggle mouse wheel capture mode" },
   { command: "/compact", description: "compact conversation history to free context space" },
   { command: "/new", description: "clear context and start a new conversation" },
   { command: "/resume", description: "list recent saved sessions or restore one by id" },
   { command: "/exit", description: "exit the CLI" },
 ];
+
+const MOUSE_INPUT_SEQUENCE_RE = /^\u001b\[<(\d+);(\d+);(\d+)([Mm])$/;
 
 function getSkillSlashCommands(): SlashCommand[] {
   const limit = 30;
@@ -269,6 +275,24 @@ function stripAnsi(text: string): string {
 
 function toolPreview(value: string, maxLength = 400): string {
   return ellipsize(value.replaceAll(/\s+/g, " ").trim(), maxLength);
+}
+
+function parseMouseInputSequence(input: string): { kind: "wheel"; delta: number } | { kind: "other" } | null {
+  const match = MOUSE_INPUT_SEQUENCE_RE.exec(input);
+  if (!match) {
+    return null;
+  }
+
+  const code = Number(match[1]);
+  if ((code & 64) === 64) {
+    return { kind: "wheel", delta: (code & 1) === 0 ? 3 : -3 };
+  }
+
+  return { kind: "other" };
+}
+
+function mouseWheelStatusLabel(enabled: boolean): string {
+  return enabled ? "wheel capture on" : "copy mode";
 }
 
 type ToolDisplay = {
@@ -557,7 +581,7 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
     >
       <Box justifyContent="space-between">
         <Text bold color="red">xbcode</Text>
-        <Text color="gray">v2.1.80</Text>
+        <Text color="gray">v{pkg.version}</Text>
       </Box>
       <Box marginTop={1}>
         <Box width="36%" flexDirection="column" paddingRight={2}>
@@ -617,6 +641,7 @@ function helpMessage(): string {
     "inbox               drain lead inbox",
     "provider [name]     switch provider (no arg = list providers)",
     "model [name]        switch model within current provider",
+    "mouse [on|off]      toggle mouse wheel capture; off restores drag-to-copy",
     "compact             compact conversation history to free context space",
     "new                 clear context and start a new conversation",
     "resume [sessionId]  list recent sessions or restore one",
@@ -1069,7 +1094,7 @@ function ModelSelectPrompt({ choices, selectedIndex, activeModelId }: ModelSelec
 
 function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   const { exit } = useApp();
-  useStdin();
+  const { internal_eventEmitter } = useStdin();
   const initialRestoredMessages = startupResume.snapshot ? restoreMessages(startupResume.snapshot.messages) : [];
   const initialMessages = [
     headerItem(),
@@ -1080,6 +1105,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   const messagesRef = useRef<UiMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mouseWheelEnabled, setMouseWheelEnabled] = useState(false);
   const [trusted, setTrusted] = useState<boolean | null>(null);
   /**
    * Startup can begin with a fully resolved model when either:
@@ -1584,6 +1610,35 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         return;
       }
 
+      if (command.startsWith("mouse")) {
+        const mouseArg = command.slice(5).trim().toLowerCase();
+        let nextValue: boolean;
+
+        if (!mouseArg) {
+          nextValue = !mouseWheelEnabled;
+        } else if (["on", "enable", "enabled"].includes(mouseArg)) {
+          nextValue = true;
+        } else if (["off", "disable", "disabled"].includes(mouseArg)) {
+          nextValue = false;
+        } else if (["status", "state"].includes(mouseArg)) {
+          pushMessage("system", `Mouse mode: ${mouseWheelStatusLabel(mouseWheelEnabled)}.`, "mouse");
+          return;
+        } else {
+          pushMessage("error", 'Usage: /mouse [on|off|status]', "mouse");
+          return;
+        }
+
+        setMouseWheelEnabled(nextValue);
+        pushMessage(
+          "system",
+          nextValue
+            ? "Mouse wheel capture enabled. Terminal drag-to-copy may stop working."
+            : "Mouse wheel capture disabled. Terminal drag-to-copy is restored.",
+          "mouse",
+        );
+        return;
+      }
+
       if (command.startsWith("login")) {
         const providerArg = command.slice(5).trim() || currentResolved.providerName;
         const settings = loadSettings();
@@ -1921,29 +1976,38 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   }, [maxScrollOffset]);
 
   useEffect(() => {
-    if (!showMainUi || !process.stdout.isTTY) {
+    if (!showMainUi || !process.stdout.isTTY || !mouseWheelEnabled) {
       return;
     }
 
     /**
-     * 这里不再打开 SGR 鼠标追踪。
-     *
-     * 原因：
-     * - 之前启用 `1000/1006` 后，终端会把点击和拖拽都交给应用，而不是交给终端模拟器做原生文本选择。
-     * - 当前项目只实现了滚轮滚动，没有实现点击选中文本和复制，所以用户一旦点进 UI，拖选复制就会失效。
-     * - 改成开启 `1007` alternate scroll 后，支持该模式的终端会把滚轮转换成上下导航键，同时不会劫持普通鼠标点击。
-     *
-     * 这样做的目标是：
-     * - 保留终端原生的鼠标拖选/复制；
-     * - 尽量继续保留滚轮浏览历史；
-     * - 避免为了修复制问题而引入一整套复杂的自定义文本选择实现。
+     * Ink 不提供滚轮事件，所以这里直接拦 stdin 的 SGR 鼠标序列。
+     * 仅消费 wheel，其他鼠标事件继续交给 Ink，避免把点击语义混进滚动逻辑。
      */
-    process.stdout.write("\x1b[?1007h");
+    const emitter = internal_eventEmitter as EventEmitter;
+    const originalEmit = emitter.emit.bind(emitter);
+    const patchedEmit: EventEmitter["emit"] = ((eventName: string | symbol, ...args: unknown[]) => {
+      if (eventName === "input" && typeof args[0] === "string") {
+        const mouseInput = parseMouseInputSequence(args[0]);
+        if (mouseInput) {
+          if (mouseInput.kind === "wheel") {
+            setScrollOffset((current) => clampScrollOffset(current + mouseInput.delta));
+          }
+          return false;
+        }
+      }
+
+      return originalEmit(eventName, ...args);
+    }) as EventEmitter["emit"];
+
+    emitter.emit = patchedEmit;
+    process.stdout.write("\x1b[?1000h\x1b[?1006h\x1b[?1007h");
 
     return () => {
-      process.stdout.write("\x1b[?1007l");
+      emitter.emit = originalEmit;
+      process.stdout.write("\x1b[?1000l\x1b[?1006l\x1b[?1007l");
     };
-  }, [showMainUi]);
+  }, [internal_eventEmitter, mouseWheelEnabled, showMainUi]);
 
   useEffect(() => {
     if (trusted !== true || !modelSelected || !currentResolved || startupMcpReportShownRef.current) {
@@ -2008,6 +2072,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
             <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
             <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} scrollOffset={effectiveScrollOffset} />
             {busy ? <Text color="gray">Working... Esc stops this turn. PgUp/PgDn/Home/End browse history.</Text> : null}
+            {!busy ? <Text color="gray">Mouse: {mouseWheelStatusLabel(mouseWheelEnabled)}. Use /mouse on or /mouse off.</Text> : null}
             <Box width="100%" flexDirection="row">
               <Box width={2} flexShrink={0}>
                 <Text>› </Text>
