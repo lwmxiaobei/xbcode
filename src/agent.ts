@@ -1,4 +1,5 @@
 import OpenAI, { APIUserAbortError } from "openai";
+import path from "node:path";
 
 import {
   microCompact,
@@ -8,12 +9,13 @@ import {
   TOKEN_THRESHOLD,
 } from "./compact.js";
 import { isTransientNetworkError } from "./http.js";
+import { logApiError, wrapApiError } from "./error-log.js";
 import { getDynamicMcpToolSurface } from "./mcp/runtime.js";
 import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, BASE_CHAT_TOOLS, TEAMMATE_TOOLS, TEAMMATE_CHAT_TOOLS, BASE_TOOL_HANDLERS, taskManager } from "./tools.js";
 import { formatTeammateMessages } from "./message-bus.js";
 import { getSubagentDefinition, type SubagentDefinition } from "./subagents.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";
-import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage } from "./types.js";
+import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment } from "./types.js";
 
 // P1：删除 MailboxEventType / MAILBOX_EVENT_TYPES / normalizeEventType。
 // 这些是 P3 协议消息字段，从 P1 阶段的 MailboxMessage 中已彻底移除。
@@ -127,16 +129,29 @@ function normalizeResponseInput(inputItems: ResponseInputItem[] | string): Respo
  * - The same shape remains valid for providers that still support the public
  *   Responses API shorthand.
  */
-function buildUserResponseMessage(text: string): ResponseInputItem {
+function buildResponseInputContent(text: string, attachments: ImageAttachment[] = []): ResponseInputItem[] {
+  const content: ResponseInputItem[] = [
+    {
+      type: "input_text",
+      text,
+    },
+  ];
+
+  for (const attachment of attachments) {
+    content.push({
+      type: "input_image",
+      image_url: `data:${attachment.mimeType};base64,${attachment.base64Data}`,
+    });
+  }
+
+  return content;
+}
+
+function buildUserResponseMessage(text: string, attachments: ImageAttachment[] = []): ResponseInputItem {
   return {
     type: "message",
     role: "user",
-    content: [
-      {
-        type: "input_text",
-        text,
-      },
-    ],
+    content: buildResponseInputContent(text, attachments),
   };
 }
 
@@ -150,6 +165,52 @@ function buildUserResponseMessage(text: string): ResponseInputItem {
  */
 function buildCompactedResponsesQuery(summary: string, query: string): string {
   return `${summary}\n\nCurrent user request:\n${query}`;
+}
+
+function buildChatUserMessageContent(text: string, attachments: ImageAttachment[] = []): string | Array<Record<string, unknown>> {
+  if (attachments.length === 0) {
+    return text;
+  }
+
+  const content: Array<Record<string, unknown>> = [
+    {
+      type: "text",
+      text,
+    },
+  ];
+
+  for (const attachment of attachments) {
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: `data:${attachment.mimeType};base64,${attachment.base64Data}`,
+      },
+    });
+  }
+
+  return content;
+}
+
+function describeAttachments(attachments: ImageAttachment[]): string {
+  if (attachments.length === 0) {
+    return "";
+  }
+
+  return attachments
+    .map((attachment, index) => `Image ${index + 1}: ${path.basename(attachment.path)}`)
+    .join("\n");
+}
+
+const CHAT_REASONING_CONTENT_REQUIRED_MODEL_PATTERNS = [
+  /^mimo(?:[-_.]|$)/i,
+];
+
+export function shouldPreserveChatReasoningContent(model: string, showThinking: boolean): boolean {
+  if (!showThinking) {
+    return false;
+  }
+  const normalizedModel = model.trim();
+  return CHAT_REASONING_CONTENT_REQUIRED_MODEL_PATTERNS.some((pattern) => pattern.test(normalizedModel));
 }
 
 /**
@@ -465,6 +526,7 @@ async function streamResponse(
   tools: readonly any[] = TOOLS,
   control?: RunControl,
   onUsage?: (usage: TokenUsage) => void,
+  caller: string = "main",
 ): Promise<any> {
   throwIfAborted(control?.signal);
   const normalizedInstructions = system.trim() || "You are a helpful coding assistant.";
@@ -696,7 +758,16 @@ async function streamResponse(
       attempt += 1;
       continue;
     }
-    throw error;
+    logApiError(caller, error, {
+      api: "responses",
+      model,
+      previousResponseId,
+      toolCount: tools.length,
+      inputItemCount: normalizedInput.length,
+      inputCharCount: JSON.stringify(normalizedInput).length,
+      showThinking,
+    });
+    throw wrapApiError(caller, error);
   }
   }
 }
@@ -711,6 +782,7 @@ async function streamChatCompletion(
   showThinking: boolean = false,
   control?: RunControl,
   onUsage?: (usage: TokenUsage) => void,
+  caller: string = "main",
 ): Promise<{ content: string | null; tool_calls: any[]; reasoning_content?: string }> {
   throwIfAborted(control?.signal);
 
@@ -751,7 +823,15 @@ async function streamChatCompletion(
         attempt += 1;
         continue;
       }
-      throw error;
+      logApiError(caller, error, {
+        api: "chat-completions",
+        model,
+        toolCount: tools.length,
+        inputItemCount: history.length,
+        inputCharCount: JSON.stringify(history).length,
+        showThinking,
+      });
+      throw wrapApiError(caller, error);
     }
 
     try {
@@ -818,7 +898,15 @@ async function streamChatCompletion(
         attempt += 1;
         continue;
       }
-      throw error;
+      logApiError(caller, error, {
+        api: "chat-completions",
+        model,
+        toolCount: tools.length,
+        inputItemCount: history.length,
+        inputCharCount: JSON.stringify(history).length,
+        showThinking,
+      });
+      throw wrapApiError(caller, error);
     }
   }
 }
@@ -917,6 +1005,7 @@ async function launchTeammateRuntime(config: AgentConfig, control: TeammateRunti
     if (actionableMessages.length > 0) {
       teammateManager.markWorking(control.name);
       const prompt = `${formatTeammateMessages(actionableMessages)}\n\n${buildInboxWorkPrompt()}`;
+      const attachments: ImageAttachment[] = [];
       const runtime = await prepareToolRuntime(
         buildTeammateHandlers(control.name),
         TEAMMATE_TOOLS,
@@ -925,11 +1014,14 @@ async function launchTeammateRuntime(config: AgentConfig, control: TeammateRunti
       await runTurn(
         config,
         prompt,
+        attachments,
         control.state,
         bridge,
         runtime.handlers,
         runtime.responseTools,
         runtime.chatTools,
+        undefined,
+        `teammate:${control.name}`,
       );
     }
 
@@ -1077,8 +1169,9 @@ async function subAgentLoopResponses(
   let currentResponseId: string | undefined;
   let lastText = "";
 
+  const caller = `subagent:${definition.name}`;
   for (let round = 0; round < definition.maxRounds; round += 1) {
-    const response = await streamResponse(client, model, system, false, nextInput, currentResponseId, bridge, runtime.responseTools);
+    const response = await streamResponse(client, model, system, false, nextInput, currentResponseId, bridge, runtime.responseTools, undefined, undefined, caller);
     currentResponseId = response.id;
 
     const textItems = Array.isArray(response.output)
@@ -1128,8 +1221,9 @@ async function subAgentLoopChatCompletions(
   const history: ChatMessage[] = [{ role: "user", content: description }];
   let lastText = "";
 
+  const caller = `subagent:${definition.name}`;
   for (let round = 0; round < definition.maxRounds; round += 1) {
-    const message = await streamChatCompletion(client, model, system, history, bridge, runtime.chatTools, false);
+    const message = await streamChatCompletion(client, model, system, history, bridge, runtime.chatTools, false, undefined, undefined, caller);
 
     const assistantText = extractAssistantText(message.content);
     if (assistantText.trim()) {
@@ -1167,6 +1261,7 @@ async function subAgentLoopChatCompletions(
 async function agentLoop(
   config: AgentConfig,
   query: string,
+  attachments: ImageAttachment[],
   previousResponseId: string | undefined,
   bridge: UiBridge,
   state: AgentState,
@@ -1174,6 +1269,7 @@ async function agentLoop(
   tools: readonly any[] = TOOLS,
   control?: RunControl,
   onUsage?: (usage: TokenUsage) => void,
+  caller: string = "main",
 ): Promise<string | undefined> {
   /**
    * Most Responses providers support `previous_response_id`, so they can keep
@@ -1192,11 +1288,11 @@ async function agentLoop(
    */
   const replayHistory = [
     ...state.responseHistory.map((item) => cloneResponseReplayItem(item)),
-    buildUserResponseMessage(query),
+    buildUserResponseMessage(query, attachments),
   ];
   let nextInput: ResponseInputItem[] | string = usesStatelessReplay
     ? replayHistory
-    : [buildUserResponseMessage(query)];
+    : [buildUserResponseMessage(query, attachments)];
   let currentResponseId = usesStatelessReplay ? undefined : previousResponseId;
 
   while (true) {
@@ -1212,6 +1308,8 @@ async function agentLoop(
       bridge,
       tools,
       control,
+      onUsage,
+      caller,
     );
     currentResponseId = response.id;
 
@@ -1263,6 +1361,7 @@ async function agentLoopWithChatCompletions(
   tools: readonly any[] = CHAT_TOOLS,
   control?: RunControl,
   onUsage?: (usage: TokenUsage) => void,
+  caller: string = "main",
 ): Promise<void> {
   while (true) {
     throwIfAborted(control?.signal);
@@ -1288,6 +1387,7 @@ async function agentLoopWithChatCompletions(
         config.showThinking,
         control,
         onUsage,
+        caller,
       );
     } catch (error) {
       if (error instanceof TurnInterruptedError && error.partialAssistantText) {
@@ -1343,12 +1443,14 @@ async function agentLoopWithChatCompletions(
 async function runTurn(
   config: AgentConfig,
   query: string,
+  attachments: ImageAttachment[],
   state: AgentState,
   bridge: UiBridge,
   handlers: ToolHandlerMap,
   responseTools: readonly any[],
   chatTools: readonly any[],
   control?: RunControl,
+  caller: string = "main",
 ): Promise<void> {
   throwIfAborted(control?.signal);
   const { apiMode } = config;
@@ -1365,9 +1467,11 @@ async function runTurn(
   };
 
   if (apiMode === "chat-completions") {
-    for (const msg of state.chatHistory) {
-      if (msg.role === "assistant" && "reasoning_content" in msg) {
-        delete msg.reasoning_content;
+    if (!shouldPreserveChatReasoningContent(config.model, config.showThinking)) {
+      for (const msg of state.chatHistory) {
+        if (msg.role === "assistant" && "reasoning_content" in msg) {
+          delete msg.reasoning_content;
+        }
       }
     }
 
@@ -1381,9 +1485,9 @@ async function runTurn(
       state.compactCount += 1;
     }
 
-    state.chatHistory.push({ role: "user", content: query });
+    state.chatHistory.push({ role: "user", content: buildChatUserMessageContent(query, attachments) });
     try {
-      await agentLoopWithChatCompletions(config, state.chatHistory, bridge, state, handlers, chatTools, control, onUsage);
+      await agentLoopWithChatCompletions(config, state.chatHistory, bridge, state, handlers, chatTools, control, onUsage, caller);
     } catch (error) {
       if (error instanceof TurnInterruptedError) {
         repairInterruptedToolCallHistory(state.chatHistory);
@@ -1426,6 +1530,7 @@ async function runTurn(
     state.previousResponseId = await agentLoop(
       config,
       responsesQuery,
+      attachments,
       state.previousResponseId,
       bridge,
       state,
@@ -1433,6 +1538,7 @@ async function runTurn(
       responseTools,
       control,
       onUsage,
+      caller,
     );
     state.pendingCompactedContext = undefined;
   } catch (error) {
@@ -1456,10 +1562,11 @@ export type AgentConfig = {
 export async function runAgentTurn(
   config: AgentConfig,
   query: string,
+  attachments: ImageAttachment[],
   state: AgentState,
   bridge: UiBridge,
   control?: RunControl,
 ): Promise<void> {
   const runtime = await prepareToolRuntime(buildLeadHandlers(config, bridge), TOOLS, CHAT_TOOLS);
-  await runTurn(config, query, state, bridge, runtime.handlers, runtime.responseTools, runtime.chatTools, control);
+  await runTurn(config, query, attachments, state, bridge, runtime.handlers, runtime.responseTools, runtime.chatTools, control);
 }

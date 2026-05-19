@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { extractAssistantTextFromResponseOutput, getMissingAssistantText } from "../src/agent.js";
+import {
+  extractAssistantTextFromResponseOutput,
+  getMissingAssistantText,
+  shouldPreserveChatReasoningContent,
+} from "../src/agent.js";
 
 test("extractAssistantTextFromResponseOutput recovers assistant text from message output items", () => {
   const output = [
@@ -37,4 +41,10 @@ test("getMissingAssistantText avoids duplicates when streamed text already match
 
 test("getMissingAssistantText falls back to the final text when streamed text diverges", () => {
   assert.equal(getMissingAssistantText("先说明", "我先说明计划，再调用工具。"), "我先说明计划，再调用工具。");
+});
+
+test("shouldPreserveChatReasoningContent keeps thinking payloads only for models that require replay", () => {
+  assert.equal(shouldPreserveChatReasoningContent("mimo-v2.5-pro", true), true);
+  assert.equal(shouldPreserveChatReasoningContent("gpt-5.4", true), false);
+  assert.equal(shouldPreserveChatReasoningContent("mimo-v2.5-pro", false), false);
 });

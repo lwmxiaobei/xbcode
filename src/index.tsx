@@ -17,6 +17,7 @@ import wrapAnsi from "wrap-ansi";
 import pkg from "../package.json" with { type: "json" };
 
 import { isTurnInterruptedError, runAgentTurn, type AgentConfig } from "./agent.js";
+import { extractImagePathsFromText, importClipboardImageMacos } from "./clipboard-image.js";
 // P1：删除 supervisor.ts（processLeadInboxEvents 依赖的 eventType/taskId 协议字段已移除）。
 // P3 协议消息阶段会用独立机制重做事件处理，不再混在 lead 邮箱消费流程里。
 import {
@@ -56,7 +57,7 @@ import {
 import { buildSystemPrompt } from "./prompt.js";
 import { appendSessionCheckpoint, createSessionId, listRecentSessions, loadSession, type SessionSnapshot } from "./session-store.js";
 import { skillLoader, messageBus, taskManager, teammateManager } from "./tools.js";
-import type { AgentState, DiffLine, PersistedUiMessage, TokenUsage, UiBridge, UiMessage } from "./types.js";
+import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, TokenUsage, UiBridge, UiMessage } from "./types.js";
 import { fetchOpenAIUsage, formatUsageReport, UsageRequestError } from "./usage.js";
 import { ellipsize } from "./utils.js";
 
@@ -651,7 +652,9 @@ function helpMessage(): string {
     `providers  ${providerList}`,
     "",
     "Press Esc while working to stop the current turn without clearing session context.",
+    "Use Cmd+V (or Ctrl+V) to import a clipboard image as an attachment on macOS.",
     "Slash variants also work, for example /help and /exit.",
+    "Dragging an image file into the terminal attaches it automatically.",
     "Anything else is sent directly to the model.",
   ].join("\n");
 }
@@ -1080,6 +1083,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   const messagesRef = useRef<UiMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState<ImageAttachment[]>([]);
   // P1：busyRef 与 busy state 镜像，给 onSend("lead") listener 闭包用。
   // 闭包读 state 会拿旧值，必须用 ref 读最新值。所有 setBusy 调用处同步更新此 ref。
   const busyRef = useRef(false);
@@ -1210,6 +1214,16 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     }
   };
 
+  const importClipboardImage = async () => {
+    try {
+      const attachment = await importClipboardImageMacos();
+      setPendingAttachments((current) => [...current, attachment]);
+      pushMessage("system", `Attached image from clipboard: ${path.basename(attachment.path)}`, "image");
+    } catch (error) {
+      pushMessage("error", error instanceof Error ? error.message : String(error), "image");
+    }
+  };
+
   const appendStreamingMessage = (kind: "assistant" | "thinking", ref: StringRef, delta: string, title?: string) => {
     if (!delta) {
       return;
@@ -1284,6 +1298,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     assistantMessageIdRef.current = undefined;
     thinkingMessageIdRef.current = undefined;
     setStreamingId(undefined);
+    setPendingAttachments([]);
     agentStateRef.current = snapshot?.state ?? {
       sessionId: createSessionId(),
       responseHistory: [],
@@ -1301,6 +1316,34 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     setSessionKey((k) => k + 1);
     messagesRef.current = [headerItem(), ...restoredMessages];
     setMessages(messagesRef.current);
+  };
+
+  const clearPendingAttachments = () => {
+    setPendingAttachments([]);
+  };
+
+  const attachImagesFromText = (rawValue: string): { value: string; newlyAttached: ImageAttachment[] } => {
+    const { attachments, remainingText } = extractImagePathsFromText(rawValue);
+    if (attachments.length === 0) {
+      return { value: rawValue, newlyAttached: [] };
+    }
+
+    const newlyAttached: ImageAttachment[] = [];
+    setPendingAttachments((current) => {
+      const existing = new Set(current.map((attachment) => attachment.path));
+      const next = [...current];
+      for (const attachment of attachments) {
+        if (!existing.has(attachment.path)) {
+          next.push(attachment);
+          newlyAttached.push(attachment);
+          existing.add(attachment.path);
+          pushMessage("system", `Attached image: ${path.basename(attachment.path)}`, "image");
+        }
+      }
+      return next;
+    });
+
+    return { value: remainingText, newlyAttached };
   };
 
   const requestActiveTurnStop = () => {
@@ -1392,7 +1435,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   // P1 单轮运行入口：把未读 lead 消息 + 用户 query 合并注入，调用 runAgentTurn。
   // 之所以拆成 helper：用户主动提交（带 query）和自动续轮（query 为空）共用同一段逻辑，避免重复。
   // 命名为 runOneTurn 与 spec §3.5 对齐。
-  const runOneTurn = async (userQuery: string, signal: AbortSignal): Promise<void> => {
+  const runOneTurn = async (userQuery: string, attachments: ImageAttachment[], signal: AbortSignal): Promise<void> => {
     const unread = await messageBus.readUnread("lead");
     let injected = "";
     if (unread.length > 0) {
@@ -1410,6 +1453,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     await runAgentTurn(
       agentConfig,
       effectiveQuery,
+      attachments,
       agentStateRef.current,
       bridge,
       { signal },
@@ -1430,13 +1474,13 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     try {
       await ensureMcpInitialized();
       await refreshCurrentAuth();
-      await runOneTurn("", abortController.signal);
+      await runOneTurn("", [], abortController.signal);
       while (
         !abortController.signal.aborted
         && (await messageBus.unreadCount("lead")) > 0
       ) {
         pushMessage("system", "(continuing turn for teammate message(s))", "inbox");
-        await runOneTurn("", abortController.signal);
+        await runOneTurn("", [], abortController.signal);
       }
     } catch (error) {
       finalizeStreaming();
@@ -1465,13 +1509,13 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const submitQuery = async (query: string) => {
+  const submitQuery = async (query: string, attachments: ImageAttachment[] = []) => {
     const trimmed = query.trim();
-    if (!trimmed || busy) {
+    if ((!trimmed && attachments.length === 0) || busy) {
       return;
     }
 
-    const command = normalizeCommand(trimmed);
+    const command = attachments.length > 0 ? null : normalizeCommand(trimmed);
     const skillSlashInvocation = command ? null : parseSkillSlashInvocation(trimmed);
     const hasSelectedModel = userHasChosenModel && Boolean(currentResolved);
 
@@ -1875,6 +1919,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
           await runAgentTurn(
             agentConfig,
             skillLoader.renderSkill(skillSlashInvocation.command, skillSlashInvocation.args),
+            [],
             agentStateRef.current,
             bridge,
             { signal: abortController.signal },
@@ -1914,7 +1959,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       await refreshCurrentAuth();
 
       // P1：用户主动提交时合并未读邮件 + 用户 query 一起注入。
-      await runOneTurn(trimmed, abortController.signal);
+      await runOneTurn(trimmed, attachments, abortController.signal);
 
       // 严格 CC 自动续轮：邮箱有未读就持续开新轮，直到清空或被 abort。
       // 为什么不加熔断：北哥要求严格对齐 CC，CC 自身也无熔断。
@@ -1924,7 +1969,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         && (await messageBus.unreadCount("lead")) > 0
       ) {
         pushMessage("system", "(continuing turn for teammate message(s))", "inbox");
-        await runOneTurn("", abortController.signal);
+        await runOneTurn("", [], abortController.signal);
       }
     } catch (error) {
       finalizeStreaming();
@@ -1948,6 +1993,11 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
       requestExit();
+      return;
+    }
+
+    if ((key.meta || key.ctrl) && input.toLowerCase() === "v" && !busy && trusted === true && modelSelected) {
+      void importClipboardImage();
       return;
     }
 
@@ -2039,8 +2089,11 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       return;
     }
 
+    const normalized = attachImagesFromText(value);
+    const attachments = [...pendingAttachments, ...normalized.newlyAttached];
     setInputValue("");
-    void submitQuery(value);
+    clearPendingAttachments();
+    void submitQuery(normalized.value, attachments);
   };
 
   const innerWidth = Math.max(0, Math.min(terminalSize.columns - 2, 110));
@@ -2135,9 +2188,17 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
                 <Text>› </Text>
               </Box>
               <Box flexGrow={1} flexShrink={1}>
-                <TextInput value={inputValue} onChange={setInputValue} onSubmit={handleSubmit} focus={!busy} showCursor={!busy} />
+                <TextInput value={inputValue} onChange={(value) => setInputValue(attachImagesFromText(value).value)} onSubmit={handleSubmit} focus={!busy} showCursor={!busy} />
               </Box>
             </Box>
+            {pendingAttachments.length > 0 ? (
+              <Box flexDirection="column" marginTop={1}>
+                <Text color="yellow">Attachments ({pendingAttachments.length})</Text>
+                {pendingAttachments.map((attachment, index) => (
+                  <Text key={`${attachment.path}-${index}`} color="gray">  {index + 1}. {path.basename(attachment.path)} · {attachment.mimeType}</Text>
+                ))}
+              </Box>
+            ) : null}
             {showSlashMenu ? (
               <Box flexDirection="column" marginTop={1}>
                 {visibleSlashMenu.hiddenAbove > 0 ? (
@@ -2164,7 +2225,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
             ) : null}
             <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
             {userHasChosenModel && currentResolved
-              ? <Text color="gray">{currentResolved.providerName}: {currentResolved.model} | api: {currentResolved.apiMode} | {ellipsize(getEffectiveBaseURL(currentResolved, currentAuthState), 40)}</Text>
+              ? <Text color="gray">{currentResolved.providerName}: {currentResolved.model} | api: {currentResolved.apiMode} | attachments: {pendingAttachments.length} | {ellipsize(getEffectiveBaseURL(currentResolved, currentAuthState), 32)}</Text>
               : <Text color="red">No model selected. Use /model to select one.</Text>}
           </Box>
         </>

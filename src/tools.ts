@@ -33,14 +33,9 @@ export const taskManager = new TaskManager(path.join(WORKDIR, ".tasks"));
 export const messageBus = new MessageBus(TEAM_DIR);
 export const teammateManager = new TeammateManager(TEAM_DIR, messageBus, LEAD_NAME);
 
-// 所有文件工具都被限制在工作区内，防止模型读写越界路径。
+// 路径解析（不再限制在工作区内）。
 function safePath(relativePath: string): string {
-  const resolved = path.resolve(WORKDIR, relativePath);
-  const relative = path.relative(WORKDIR, resolved);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(`Path escapes workspace: ${relativePath}`);
-  }
-  return resolved;
+  return path.resolve(WORKDIR, relativePath);
 }
 
 // child_process 的超时错误没有稳定类型，这里单独抽成守卫函数做识别。

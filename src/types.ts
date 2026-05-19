@@ -2,6 +2,12 @@ export type ToolArgs = Record<string, unknown>;
 export type ResponseInputItem = Record<string, unknown>;
 export type ChatMessage = Record<string, unknown>;
 
+export type ImageAttachment = {
+  path: string;
+  mimeType: string;
+  base64Data: string;
+};
+
 export type AgentState = {
   sessionId: string;
   previousResponseId?: string;
