@@ -51,6 +51,8 @@ export type TokenUsage = {
   cost: number;
 };
 
+export type ToolApprovalDecision = "approved" | "rejected";
+
 export type UiBridge = {
   appendAssistantDelta(delta: string): void;
   appendThinkingDelta(delta: string): void;
@@ -58,4 +60,7 @@ export type UiBridge = {
   pushAssistant(text: string): void;
   pushTool(name: string, args: ToolArgs, result: string): void;
   updateUsage(usage: TokenUsage): void;
+  // Human-in-the-loop gate: the loop calls this before running a mutating tool.
+  // Implementations may auto-approve (e.g. sub-agents) or prompt the user.
+  requestToolApproval(name: string, args: ToolArgs): Promise<ToolApprovalDecision>;
 };

@@ -57,7 +57,7 @@ import {
 import { buildSystemPrompt } from "./prompt.js";
 import { appendSessionCheckpoint, createSessionId, listRecentSessions, loadSession, type SessionSnapshot } from "./session-store.js";
 import { skillLoader, messageBus, taskManager, teammateManager } from "./tools.js";
-import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, TokenUsage, UiBridge, UiMessage } from "./types.js";
+import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, ToolApprovalDecision, ToolArgs, TokenUsage, UiBridge, UiMessage } from "./types.js";
 import { fetchOpenAIUsage, formatUsageReport, UsageRequestError } from "./usage.js";
 import { ellipsize } from "./utils.js";
 
@@ -408,6 +408,11 @@ function formatBash(args: Record<string, unknown>, result: string): ToolDisplay 
 }
 
 function formatToolDisplay(name: string, args: Record<string, unknown>, result: string): ToolDisplay | null {
+  // A rejected call did not run, so skip the rich diff/command view (which would
+  // otherwise look as if it had been applied) and fall back to plain text.
+  if (result.startsWith("Rejected by user:")) {
+    return null;
+  }
   switch (name) {
     case "edit_file":
       return result.startsWith("Error") ? null : formatEditFileDiff(args);
@@ -418,6 +423,54 @@ function formatToolDisplay(name: string, args: Record<string, unknown>, result: 
     default:
       return null;
   }
+}
+
+// One-line-per-entry summary of what a tool call will do, shown in the approval
+// prompt so the user can decide without inspecting raw JSON args.
+function summarizeApprovalTarget(name: string, args: Record<string, unknown>): string[] {
+  switch (name) {
+    case "bash":
+      return String(args.command ?? "").split("\n").slice(0, 8);
+    case "write_file":
+      return [`write → ${String(args.path ?? "")}`];
+    case "edit_file":
+      return [`edit → ${String(args.path ?? "")}`];
+    default:
+      return [toolPreview(JSON.stringify(args))];
+  }
+}
+
+type ApprovalPromptProps = Readonly<{
+  name: string;
+  lines: string[];
+  selectedIndex: number;
+  width: number;
+}>;
+
+function ApprovalPrompt({ name, lines, selectedIndex, width }: ApprovalPromptProps) {
+  const options = [
+    "Yes, run once",
+    `Yes, and always allow ${name} this session`,
+    "No, reject this call (Esc)",
+  ];
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color="yellow" wrap="truncate">{borderRule(width)}</Text>
+      <Text bold color="yellow">Approve tool call: {name}?</Text>
+      {lines.map((line, index) => (
+        <Text key={index} color="gray" wrap="truncate">  {line || " "}</Text>
+      ))}
+      <Newline />
+      {options.map((label, index) => (
+        <Text key={label} color={selectedIndex === index ? "cyan" : "white"}>
+          {selectedIndex === index ? "›" : " "} {index + 1}. {label}
+        </Text>
+      ))}
+      <Text color="gray">↑/↓ to choose, Enter to confirm, Esc to reject</Text>
+      <Text color="yellow" wrap="truncate">{borderRule(width)}</Text>
+    </Box>
+  );
 }
 
 const marked = new Marked({ async: false }, markedTerminal({ reflowText: true, showSectionPrefix: false }));
@@ -1125,6 +1178,13 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const stopRequestedRef = useRef(false);
   const startupMcpReportShownRef = useRef(false);
+  // Human-in-the-loop tool approval. `pendingApproval` drives the overlay; the
+  // resolver settles the promise the agent loop is awaiting; the allowlist
+  // remembers "always allow <tool>" choices for the lifetime of this session.
+  const [pendingApproval, setPendingApproval] = useState<{ name: string; args: ToolArgs; lines: string[] } | null>(null);
+  const [approvalSelection, setApprovalSelection] = useState(0);
+  const approvalResolverRef = useRef<((decision: ToolApprovalDecision) => void) | null>(null);
+  const alwaysAllowToolsRef = useRef<Set<string>>(new Set());
   const agentStateRef = useRef<AgentState>({
     ...(startupResume.snapshot?.state ?? {
       sessionId: createSessionId(),
@@ -1292,6 +1352,31 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     updateUsage(usage: TokenUsage) {
       setTotalTokenUsage(usage);
     },
+    requestToolApproval(name, args) {
+      // Already approved for the session — run without prompting.
+      if (alwaysAllowToolsRef.current.has(name)) {
+        return Promise.resolve<ToolApprovalDecision>("approved");
+      }
+      finalizeStreaming();
+      return new Promise<ToolApprovalDecision>((resolve) => {
+        approvalResolverRef.current = resolve;
+        setApprovalSelection(0);
+        setPendingApproval({ name, args, lines: summarizeApprovalTarget(name, args) });
+      });
+    },
+  };
+
+  // Settle a pending approval and tear down the overlay. `alwaysAllowName`, when
+  // set, remembers the tool so future calls skip the prompt this session.
+  const resolveApproval = (decision: ToolApprovalDecision, alwaysAllowName?: string) => {
+    if (alwaysAllowName) {
+      alwaysAllowToolsRef.current.add(alwaysAllowName);
+    }
+    const resolve = approvalResolverRef.current;
+    approvalResolverRef.current = null;
+    setPendingApproval(null);
+    setApprovalSelection(0);
+    resolve?.(decision);
   };
 
   const resetConversation = (snapshot?: SessionSnapshot) => {
@@ -2033,6 +2118,27 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       return;
     }
 
+    if (pendingApproval) {
+      const optionCount = 3;
+      const confirm = (index: number) => {
+        if (index === 0) resolveApproval("approved");
+        else if (index === 1) resolveApproval("approved", pendingApproval.name);
+        else resolveApproval("rejected");
+      };
+      if (key.escape) {
+        resolveApproval("rejected");
+      } else if (key.upArrow || input === "k") {
+        setApprovalSelection((c) => (c - 1 + optionCount) % optionCount);
+      } else if (key.downArrow || input === "j") {
+        setApprovalSelection((c) => (c + 1) % optionCount);
+      } else if (input === "1" || input === "2" || input === "3") {
+        confirm(Number(input) - 1);
+      } else if (key.return) {
+        confirm(approvalSelection);
+      }
+      return;
+    }
+
     if (busy) {
       if (key.escape) {
         requestActiveTurnStop();
@@ -2182,7 +2288,11 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
           <Box flexDirection="column" width="100%" flexShrink={0}>
             <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
             <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} tokenUsage={totalTokenUsage} />
-            {busy ? <Text color="gray">Working... Esc stops this turn.</Text> : null}
+            {pendingApproval ? (
+              <ApprovalPrompt name={pendingApproval.name} lines={pendingApproval.lines} selectedIndex={approvalSelection} width={innerWidth} />
+            ) : busy ? (
+              <Text color="gray">Working... Esc stops this turn.</Text>
+            ) : null}
             <Box width="100%" flexDirection="row">
               <Box width={2} flexShrink={0}>
                 <Text>› </Text>
