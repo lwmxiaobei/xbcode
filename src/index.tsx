@@ -552,7 +552,7 @@ function getMessagePalette(kind: UiMessage["kind"]): { titleColor: string; bodyC
     case "error":
       return { titleColor: "red", bodyColor: "red" };
     case "thinking":
-      return { titleColor: "gray", bodyColor: "gray" };
+      return { titleColor: "blue", bodyColor: "blue" };
     case "system":
       return { titleColor: "gray", bodyColor: "white" };
     case "user":
@@ -956,7 +956,7 @@ function buildMessageRows(message: UiMessage, width: number): ViewportRow[] {
   if (message.kind === "thinking" && message.collapsed) {
     const lineCount = (message.text || "").split("\n").length;
     const preview = ellipsize((message.text || "").split("\n")[0].trim(), 60);
-    appendRows(`[thinking · ${lineCount} lines] ${preview}`, "gray", true);
+    appendRows(`[thinking · ${lineCount} lines] ${preview}`, "blue", true);
     return rows.map((row, index) => ({
       id: `${message.id}-${index}`,
       prefix: index === 0 ? "▸ " : "  ",
