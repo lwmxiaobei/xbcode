@@ -15,7 +15,7 @@ import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, 
 import { formatTeammateMessages } from "./message-bus.js";
 import { getSubagentDefinition, type SubagentDefinition } from "./subagents.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";
-import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment } from "./types.js";
+import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ToolApprovalDecision } from "./types.js";
 
 // P1：删除 MailboxEventType / MAILBOX_EVENT_TYPES / normalizeEventType。
 // 这些是 P3 协议消息字段，从 P1 阶段的 MailboxMessage 中已彻底移除。
@@ -70,6 +70,21 @@ function safeJsonParse(value: string): ToolArgs {
   } catch {
     return {};
   }
+}
+
+// Human-in-the-loop: only side-effecting tools are gated behind user approval.
+// Read-only tools (read_file/glob/grep/task_*/mcp reads) run without a prompt so
+// the loop stays fast. `bash` keeps its dangerous-command blocklist underneath.
+const TOOLS_REQUIRING_APPROVAL = new Set<string>(["bash", "write_file", "edit_file"]);
+
+function toolNeedsApproval(name: string): boolean {
+  return TOOLS_REQUIRING_APPROVAL.has(name);
+}
+
+// Returned to the model in place of a real tool result when the user denies a
+// call, so the tool-call/result pairing stays valid and the model re-plans.
+function buildToolRejectionOutput(name: string): string {
+  return `Rejected by user: the tool "${name}" was not run. Do not retry it. Ask the user how they would like to proceed.`;
 }
 
 /**
@@ -391,6 +406,11 @@ function createSilentBridge(): UiBridge {
     pushAssistant() {},
     pushTool() {},
     updateUsage() {},
+    noteStreamActivity() {},
+    // Sub-agents and teammates run autonomously: auto-approve their tool calls.
+    requestToolApproval() {
+      return Promise.resolve<ToolApprovalDecision>("approved");
+    },
   };
 }
 
@@ -589,6 +609,10 @@ async function streamResponse(
 
   try {
     for await (const event of stream as AsyncIterable<any>) {
+      // 心跳：任何 SDK 事件都算"流还活着"，包括 reasoning_*.delta 这类
+      // 不一定渲染到 UI 的事件。让 UI 能区分"模型在 thinking"和"连接 stall"。
+      bridge.noteStreamActivity();
+
       if (event.type === "response.created") {
         responseId = String(event.response?.id ?? responseId ?? "");
       }
@@ -836,6 +860,12 @@ async function streamChatCompletion(
 
     try {
       for await (const chunk of stream) {
+        // 心跳：每个 chunk（即使是 usage-only 或空 delta）都算"流还活着"。
+        // 关键场景：mimo 这类 reasoning 模型在 thinking 阶段会持续吐
+        // `reasoning_content` chunk，但用户没开 SHOW_THINKING 时 UI 不渲染——
+        // 没有心跳的话，外部就以为"卡死"了。
+        bridge.noteStreamActivity();
+
         if (chunk.usage) {
           onUsage?.(extractTokenUsage(chunk.usage));
         }
@@ -916,10 +946,24 @@ async function runToolCall(
   bridge: UiBridge,
   handlers: ToolHandlerMap,
   control?: RunControl,
+  requireApproval = false,
 ): Promise<ResponseInputItem> {
   const name = String(toolCall.name ?? toolCall.function?.name ?? "unknown_tool");
   const rawArgs = String(toolCall.arguments ?? toolCall.function?.arguments ?? "{}");
   const args = safeJsonParse(rawArgs);
+
+  if (requireApproval && toolNeedsApproval(name)) {
+    const decision = await bridge.requestToolApproval(name, args);
+    if (decision === "rejected") {
+      const rejection = buildToolRejectionOutput(name);
+      bridge.pushTool(name, args, rejection);
+      return {
+        type: "function_call_output",
+        call_id: toolCall.call_id,
+        output: rejection,
+      };
+    }
+  }
 
   const handler = handlers[name];
   const outputText = handler ? await handler(args, control) : `Unknown tool: ${name}`;
@@ -1330,7 +1374,7 @@ async function agentLoop(
     const results: ResponseInputItem[] = [];
     for (const toolCall of toolCalls) {
       throwIfAborted(control?.signal);
-      results.push(await runToolCall(toolCall, bridge, handlers, control));
+      results.push(await runToolCall(toolCall, bridge, handlers, control, true));
       throwIfAborted(control?.signal);
     }
 
@@ -1427,8 +1471,14 @@ async function agentLoopWithChatCompletions(
       throwIfAborted(control?.signal);
       const name = String(toolCall.function?.name ?? "unknown_tool");
       const args = safeJsonParse(String(toolCall.function?.arguments ?? "{}"));
-      const handler = handlers[name];
-      const outputText = handler ? await handler(args, control) : `Unknown tool: ${name}`;
+
+      let outputText: string;
+      if (toolNeedsApproval(name) && (await bridge.requestToolApproval(name, args)) === "rejected") {
+        outputText = buildToolRejectionOutput(name);
+      } else {
+        const handler = handlers[name];
+        outputText = handler ? await handler(args, control) : `Unknown tool: ${name}`;
+      }
       bridge.pushTool(name, args, outputText);
 
       history.push({
