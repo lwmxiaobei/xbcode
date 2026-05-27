@@ -57,6 +57,7 @@ import {
 import { buildSystemPrompt } from "./prompt.js";
 import { appendSessionCheckpoint, createSessionId, listRecentSessions, loadSession, type SessionSnapshot } from "./session-store.js";
 import { skillLoader, messageBus, taskManager, teammateManager } from "./tools.js";
+import { formatBusyStatus } from "./busy-status.js";
 import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, ToolApprovalDecision, ToolArgs, TokenUsage, UiBridge, UiMessage } from "./types.js";
 import { fetchOpenAIUsage, formatUsageReport, UsageRequestError } from "./usage.js";
 import { ellipsize } from "./utils.js";
@@ -659,6 +660,36 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
   );
 }
 
+/**
+ * Footer line shown while busy. Reads heartbeat refs that the agent loop updates
+ * through `bridge.noteStreamActivity()`, and surfaces both elapsed time and
+ * (when relevant) the idle gap since the last stream event.
+ *
+ * `busyTick` is just a re-render trigger — the actual timing comes from refs so
+ * we don't churn React state once per second for every byte the model streams.
+ */
+function BusyStatusLine({
+  busyTick,
+  turnStartedAtRef,
+  lastActivityAtRef,
+}: {
+  busyTick: number;
+  turnStartedAtRef: { readonly current: number | null };
+  lastActivityAtRef: { readonly current: number | null };
+}) {
+  // referenced so React links the prop to the render; value itself isn't used
+  void busyTick;
+  const now = Date.now();
+  const startedAt = turnStartedAtRef.current ?? now;
+  const lastActivityAt = lastActivityAtRef.current ?? startedAt;
+  const elapsedSeconds = (now - startedAt) / 1000;
+  const idleSeconds = (now - lastActivityAt) / 1000;
+  // 把"是否颜色提示卡顿"的阈值放在 UI 这一层而不是 formatter 里：
+  // formatter 决定文本，UI 决定外观，两者职责分开更易调。
+  const color = idleSeconds >= 15 ? "yellow" : "gray";
+  return <Text color={color}>{formatBusyStatus(elapsedSeconds, idleSeconds)}</Text>;
+}
+
 function StatusBar({ width, busy, state, tokenUsage }: { width: number; busy: boolean; state: AgentState; tokenUsage: TokenUsage }) {
   const left = currentResolved
     ? `[${currentResolved.providerName}] ${currentResolved.model}`
@@ -1140,6 +1171,29 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   // P1：busyRef 与 busy state 镜像，给 onSend("lead") listener 闭包用。
   // 闭包读 state 会拿旧值，必须用 ref 读最新值。所有 setBusy 调用处同步更新此 ref。
   const busyRef = useRef(false);
+  // 心跳指示器：turn 起始时间 + 最近一次 stream 活动时间。每秒 tick 一次重渲染，
+  // UI 用它显示 "Working 12s · idle 7s · Esc to stop"，让用户能区分
+  // "模型还在 thinking/talking" 和 "连接 stall / 网关缓冲"。
+  //
+  // 之所以走 useEffect([busy]) 集中管理，而不是在每个 setBusy 调用点初始化 ref：
+  // - setBusy(true) 在多个分支（手动 submit、idle 唤醒、resume）都会调用，
+  //   单点初始化漏写一处就会导致 "Working 0s" 永远不更新；
+  // - useEffect 在 React 渲染稳定后只触发一次，对 ref 写入即使在 strict mode 也可控。
+  const turnStartedAtRef = useRef<number | null>(null);
+  const lastActivityAtRef = useRef<number | null>(null);
+  const [busyTick, setBusyTick] = useState(0);
+  useEffect(() => {
+    if (busy) {
+      const now = Date.now();
+      turnStartedAtRef.current = now;
+      lastActivityAtRef.current = now;
+      const interval = setInterval(() => setBusyTick((t) => t + 1), 1000);
+      return () => clearInterval(interval);
+    }
+    turnStartedAtRef.current = null;
+    lastActivityAtRef.current = null;
+    return undefined;
+  }, [busy]);
   const [trusted, setTrusted] = useState<boolean | null>(null);
   /**
    * Startup can begin with a fully resolved model when either:
@@ -1313,18 +1367,27 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
   const bridge: UiBridge = {
     appendAssistantDelta(delta) {
+      lastActivityAtRef.current = Date.now();
       appendStreamingMessage("assistant", assistantMessageIdRef, delta);
     },
     appendThinkingDelta(delta) {
+      lastActivityAtRef.current = Date.now();
       appendStreamingMessage("thinking", thinkingMessageIdRef, delta, "thinking");
     },
     finalizeStreaming() {
       finalizeStreaming();
     },
+    noteStreamActivity() {
+      lastActivityAtRef.current = Date.now();
+    },
     pushAssistant(text) {
       pushMessage("assistant", text);
     },
     pushTool(name, args, result) {
+      // tool 完成本身也算"活动"——否则一个 60s 的 bash 跑完时，
+      // 距离上次 stream event 已经过去 60s，UI 会显示 "idle 60s" 让用户误判为卡死。
+      // 这里把 tool 完成时间点也喂给心跳，配合 stream 事件就能覆盖大多数正常路径。
+      lastActivityAtRef.current = Date.now();
       finalizeStreaming();
       const display = formatToolDisplay(name, args, result);
       if (display) {
@@ -2291,7 +2354,11 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
             {pendingApproval ? (
               <ApprovalPrompt name={pendingApproval.name} lines={pendingApproval.lines} selectedIndex={approvalSelection} width={innerWidth} />
             ) : busy ? (
-              <Text color="gray">Working... Esc stops this turn.</Text>
+              <BusyStatusLine
+                busyTick={busyTick}
+                turnStartedAtRef={turnStartedAtRef}
+                lastActivityAtRef={lastActivityAtRef}
+              />
             ) : null}
             <Box width="100%" flexDirection="row">
               <Box width={2} flexShrink={0}>

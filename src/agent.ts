@@ -406,6 +406,7 @@ function createSilentBridge(): UiBridge {
     pushAssistant() {},
     pushTool() {},
     updateUsage() {},
+    noteStreamActivity() {},
     // Sub-agents and teammates run autonomously: auto-approve their tool calls.
     requestToolApproval() {
       return Promise.resolve<ToolApprovalDecision>("approved");
@@ -608,6 +609,10 @@ async function streamResponse(
 
   try {
     for await (const event of stream as AsyncIterable<any>) {
+      // 心跳：任何 SDK 事件都算"流还活着"，包括 reasoning_*.delta 这类
+      // 不一定渲染到 UI 的事件。让 UI 能区分"模型在 thinking"和"连接 stall"。
+      bridge.noteStreamActivity();
+
       if (event.type === "response.created") {
         responseId = String(event.response?.id ?? responseId ?? "");
       }
@@ -855,6 +860,12 @@ async function streamChatCompletion(
 
     try {
       for await (const chunk of stream) {
+        // 心跳：每个 chunk（即使是 usage-only 或空 delta）都算"流还活着"。
+        // 关键场景：mimo 这类 reasoning 模型在 thinking 阶段会持续吐
+        // `reasoning_content` chunk，但用户没开 SHOW_THINKING 时 UI 不渲染——
+        // 没有心跳的话，外部就以为"卡死"了。
+        bridge.noteStreamActivity();
+
         if (chunk.usage) {
           onUsage?.(extractTokenUsage(chunk.usage));
         }

@@ -60,6 +60,11 @@ export type UiBridge = {
   pushAssistant(text: string): void;
   pushTool(name: string, args: ToolArgs, result: string): void;
   updateUsage(usage: TokenUsage): void;
+  // Stream heartbeat: the agent loop calls this every time the SDK yields ANY
+  // stream event — including reasoning chunks we choose not to render. The UI
+  // uses it to distinguish "model is still talking but quietly" from "connection
+  // has stalled" without showing user-visible content for non-displayed events.
+  noteStreamActivity(): void;
   // Human-in-the-loop gate: the loop calls this before running a mutating tool.
   // Implementations may auto-approve (e.g. sub-agents) or prompt the user.
   requestToolApproval(name: string, args: ToolArgs): Promise<ToolApprovalDecision>;
