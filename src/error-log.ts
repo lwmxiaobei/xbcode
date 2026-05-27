@@ -8,13 +8,14 @@ const LOG_PATH = path.join(LOG_DIR, "error.log");
 export type ApiCaller = string;
 
 export type ApiRequestSummary = {
-  api: "responses" | "chat-completions";
+  api: "responses" | "chat-completions" | "autoCompact" | "autoCompactResponseHistory";
   model?: string;
   previousResponseId?: string;
   toolCount?: number;
   inputItemCount?: number;
   inputCharCount?: number;
   showThinking?: boolean;
+  [key: string]: any;
 };
 
 function ensureLogDir(): void {

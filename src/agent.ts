@@ -1334,7 +1334,7 @@ async function agentLoop(
       throwIfAborted(control?.signal);
     }
 
-    if (state.roundsSinceTask >= NAG_THRESHOLD && taskManager.hasActiveTasks()) {
+    if (state.roundsSinceTask >= NAG_THRESHOLD && await taskManager.hasActiveTasks()) {
       const lastResult = results[results.length - 1] as any;
       if (lastResult) {
         lastResult.output = `${NAG_MESSAGE}\n${lastResult.output}`;
@@ -1369,10 +1369,19 @@ async function agentLoopWithChatCompletions(
 
     if (estimateTokens(history) > TOKEN_THRESHOLD) {
       bridge.pushAssistant("Context approaching limit, compacting conversation...");
-      const compacted = await autoCompact(config.client, config.model, history);
-      history.length = 0;
-      history.push(...compacted.messages);
-      state.compactCount += 1;
+      try {
+        const compacted = await autoCompact(config.client, config.model, history);
+        history.length = 0;
+        history.push(...compacted.messages);
+        state.compactCount += 1;
+      } catch (error) {
+        logApiError(caller, error, {
+          api: "autoCompact",
+          model: config.model,
+          historyLength: history.length,
+        });
+        bridge.pushAssistant("⚠️ Compaction failed due to API error. Proceeding with raw history.");
+      }
     }
 
     let message;
@@ -1431,7 +1440,7 @@ async function agentLoopWithChatCompletions(
       throwIfAborted(control?.signal);
     }
 
-    if (state.roundsSinceTask >= NAG_THRESHOLD && taskManager.hasActiveTasks()) {
+    if (state.roundsSinceTask >= NAG_THRESHOLD && await taskManager.hasActiveTasks()) {
       history.push({
         role: "user",
         content: NAG_MESSAGE,
@@ -1479,10 +1488,19 @@ async function runTurn(
 
     if (estimateTokens(state.chatHistory) > TOKEN_THRESHOLD) {
       bridge.pushAssistant("Context approaching limit, compacting conversation...");
-      const compacted = await autoCompact(config.client, config.model, state.chatHistory);
-      state.chatHistory.length = 0;
-      state.chatHistory.push(...compacted.messages);
-      state.compactCount += 1;
+      try {
+        const compacted = await autoCompact(config.client, config.model, state.chatHistory);
+        state.chatHistory.length = 0;
+        state.chatHistory.push(...compacted.messages);
+        state.compactCount += 1;
+      } catch (error) {
+        logApiError(caller, error, {
+          api: "autoCompact",
+          model: config.model,
+          historyLength: state.chatHistory.length,
+        });
+        bridge.pushAssistant("⚠️ Compaction failed due to API error. Proceeding with raw history.");
+      }
     }
 
     state.chatHistory.push({ role: "user", content: buildChatUserMessageContent(query, attachments) });
@@ -1500,25 +1518,34 @@ async function runTurn(
   if (state.turnCount > 1 && (state.turnCount - 1) % RESPONSES_COMPACT_INTERVAL === 0) {
     bridge.pushAssistant("Compacting Responses API context chain...");
     if (state.responseHistory.length > 0) {
-      const compacted = await autoCompactResponseHistory(
-        config.client,
-        config.model,
-        state.responseHistory,
-      );
-      state.responseHistory = compacted.messages;
-      /**
-       * 仅 stateful provider 需要额外保存待注入的 compact 摘要。
-       *
-       * 为什么 stateless replay 不需要：
-       * - stateless 分支下一轮会直接发送 `state.responseHistory`，其中已经包含 compact summary。
-       * - stateful 分支不会默认重放本地历史，所以切链后的第一轮必须显式把摘要带回请求里。
-       */
-      state.pendingCompactedContext = config.supportsPreviousResponseId
-        ? compacted.continuationMessage
-        : undefined;
+      try {
+        const compacted = await autoCompactResponseHistory(
+          config.client,
+          config.model,
+          state.responseHistory,
+        );
+        state.responseHistory = compacted.messages;
+        /**
+         * 仅 stateful provider 需要额外保存待注入的 compact 摘要。
+         *
+         * 为什么 stateless replay 不需要：
+         * - stateless 分支下一轮会直接发送 `state.responseHistory`，其中已经包含 compact summary。
+         * - stateful 分支不会默认重放本地历史，所以切链后的第一轮必须显式把摘要带回请求里。
+         */
+        state.pendingCompactedContext = config.supportsPreviousResponseId
+          ? compacted.continuationMessage
+          : undefined;
+        state.previousResponseId = undefined;
+        state.compactCount += 1;
+      } catch (error) {
+        logApiError(caller, error, {
+          api: "autoCompactResponseHistory",
+          model: config.model,
+          historyLength: state.responseHistory.length,
+        });
+        bridge.pushAssistant("⚠️ Responses API context compaction failed. Proceeding with raw history.");
+      }
     }
-    state.previousResponseId = undefined;
-    state.compactCount += 1;
   }
 
   const pendingCompactedContext = state.pendingCompactedContext;

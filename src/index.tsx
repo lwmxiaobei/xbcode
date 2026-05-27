@@ -1644,7 +1644,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       }
 
       if (command === "tasks") {
-        pushMessage("system", taskManager.list(), "tasks");
+        pushMessage("system", await taskManager.list(), "tasks");
         return;
       }
 
@@ -1661,7 +1661,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
           return;
         }
 
-        const task = taskManager.getTask(taskId);
+        const task = await taskManager.getTask(taskId);
         if (!task) {
           pushMessage("error", `Task not found: #${taskId}`, "task");
           return;
@@ -1669,7 +1669,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
         // P1：删除 thread 事件展示。MessageBus.readThread 已废弃；
         // P3 协议消息阶段会用独立机制（不再复用 mailbox）做事件审计。
-        pushMessage("system", taskManager.formatTask(taskId), "task");
+        pushMessage("system", await taskManager.formatTask(taskId), "task");
         return;
       }
 

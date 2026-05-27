@@ -890,6 +890,23 @@ export const BASE_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    type: "function",
+    name: "web_fetch",
+    description:
+      "Fetch the content of a web page. Automatically upgrades HTTP to HTTPS, strips HTML tags to plain text, and truncates the output if it exceeds limits. Use this to read documentation or reference pages online.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "The absolute URL to fetch, e.g. 'https://example.com/docs'.",
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
 ] as const;
 
 // `task` 是主 agent 独有的能力，用于派生一次性子代理，不下放给 teammate。
@@ -1020,15 +1037,15 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
   list_mcp_resources: (args) => handleListMcpResources(args),
   read_mcp_resource: (args) => handleReadMcpResource(args),
   mcp_call: (args) => handleMcpCall(args),
-  task_create: ({ subject, description, owner, assignee }) =>
-    taskManager.create(
+  task_create: async ({ subject, description, owner, assignee }) =>
+    await taskManager.create(
       String(subject),
       toOptionalString(description),
       toOptionalString(owner) ?? LEAD_NAME,
       toOptionalString(assignee),
     ),
-  task_update: ({ task_id, status, blocked_by, blocks, assignee, result_summary, blocked_reason }) =>
-    taskManager.update(
+  task_update: async ({ task_id, status, blocked_by, blocks, assignee, result_summary, blocked_reason }) =>
+    await taskManager.update(
       Number(task_id),
       toOptionalString(status),
       blocked_by as number[] | undefined,
@@ -1037,8 +1054,8 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
       toOptionalString(result_summary),
       toOptionalString(blocked_reason),
     ),
-  task_assign: ({ task_id, assignee }) => {
-    const task = taskManager.getTask(Number(task_id));
+  task_assign: async ({ task_id, assignee }) => {
+    const task = await taskManager.getTask(Number(task_id));
     if (!task) {
       return `Error: Task ${Number(task_id)} not found.`;
     }
@@ -1048,7 +1065,7 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
       return "Error: assignee is required.";
     }
 
-    const updated = taskManager.update(task.id, "assigned", undefined, undefined, normalizedAssignee);
+    const updated = await taskManager.update(task.id, "assigned", undefined, undefined, normalizedAssignee);
     // P1：保留「lead 把任务通知到 assignee」的真实消息，简化为只 from/to/content。
     // 任务详情拼到 content 里方便 assignee 直接看到，不再依赖 payload 字段。
     // task_started 回执在此处删除（属于协议事件，P3 用独立 schema 重做）。
@@ -1060,42 +1077,43 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
     teammateManager.wake(normalizedAssignee);
     return updated;
   },
-  task_complete: ({ task_id, result_summary }) => {
-    const task = taskManager.getTask(Number(task_id));
+  task_complete: async ({ task_id, result_summary }) => {
+    const task = await taskManager.getTask(Number(task_id));
     if (!task) {
       return `Error: Task ${Number(task_id)} not found.`;
     }
 
     // P1 阶段不再向 lead 发协议消息（task_completed）。task manager 的状态变更
     // 是 lead 通过 task_list/task_get 自查的依据；P3 协议消息阶段会用独立 schema 重做。
-    const updated = taskManager.update(task.id, "completed", undefined, undefined, undefined, String(result_summary ?? ""));
+    const updated = await taskManager.update(task.id, "completed", undefined, undefined, undefined, String(result_summary ?? ""));
     return updated;
   },
-  task_block: ({ task_id, reason }) => {
-    const task = taskManager.getTask(Number(task_id));
+  task_block: async ({ task_id, reason }) => {
+    const task = await taskManager.getTask(Number(task_id));
     if (!task) {
       return `Error: Task ${Number(task_id)} not found.`;
     }
 
     // P1：同 task_complete，删除 messageBus.send；仅写入 task manager 状态。
     const text = String(reason ?? "");
-    const updated = taskManager.update(task.id, "blocked", undefined, undefined, undefined, undefined, text);
+    const updated = await taskManager.update(task.id, "blocked", undefined, undefined, undefined, undefined, text);
     return updated;
   },
-  task_fail: ({ task_id, reason }) => {
-    const task = taskManager.getTask(Number(task_id));
+  task_fail: async ({ task_id, reason }) => {
+    const task = await taskManager.getTask(Number(task_id));
     if (!task) {
       return `Error: Task ${Number(task_id)} not found.`;
     }
 
     // P1：同 task_complete，删除 messageBus.send；仅写入 task manager 状态。
     const text = String(reason ?? "");
-    const updated = taskManager.update(task.id, "failed", undefined, undefined, undefined, text);
+    const updated = await taskManager.update(task.id, "failed", undefined, undefined, undefined, text);
     return updated;
   },
-  task_list: () => taskManager.list(),
-  task_get: ({ task_id }) => taskManager.get(Number(task_id)),
+  task_list: async () => await taskManager.list(),
+  task_get: async ({ task_id }) => await taskManager.get(Number(task_id)),
   load_skill: ({ name, args }) => skillLoader.renderSkill(String(name), toOptionalString(args)),
   // P1：teammate_list handler 异步化。formatTeamStatus 在 T6 改成 async。
   teammate_list: async () => await teammateManager.formatTeamStatus(),
+  web_fetch: ({ url }, control) => runWebFetch(String(url), control?.signal),
 };
