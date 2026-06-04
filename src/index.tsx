@@ -691,9 +691,12 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
           <Text bold>Welcome back{currentResolved ? ` · ${currentResolved.providerName}` : ""}</Text>
           <Text color="gray">{ellipsize(WORKDIR, contentWidth)}</Text>
           <Text> </Text>
-          <Text color="red">   ▟██▙</Text>
-          <Text color="red">  ▟████▙</Text>
-          <Text color="red">   ▜██▛</Text>
+          <Text color="red">    ▟▙    ▟▙</Text>
+          <Text color="red">   ▟██▆▆▆▆██▙</Text>
+          <Text color="red"> ▗▟████████████▙▄▖</Text>
+          <Text color="red"> ▜████▀█████████▛▀▄</Text>
+          <Text color="red">  ▀▀▜██████████▛▀</Text>
+          <Text color="red">     ▏  ▏  ▏</Text>
           <Text> </Text>
           <Text color="gray">{currentResolved ? `${currentResolved.model} · ${currentResolved.apiMode}` : "No model selected"}</Text>
         </Box>
