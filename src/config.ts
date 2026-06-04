@@ -258,7 +258,9 @@ function resolveApiMode(baseURL: string, explicit?: string): "responses" | "chat
   if (mode === "responses") {
     return "responses";
   }
-  if (baseURL.toLowerCase().includes("deepseek.com")) {
+  const lowerBaseURL = baseURL.toLowerCase();
+  // Auto-detect providers that only support Chat Completions API
+  if (lowerBaseURL.includes("deepseek.com") || lowerBaseURL.includes("dashscope.aliyuncs.com")) {
     return "chat-completions";
   }
   return "responses";

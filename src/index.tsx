@@ -56,9 +56,10 @@ import {
 } from "./oauth/openai.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { appendSessionCheckpoint, createSessionId, listRecentSessions, loadSession, type SessionSnapshot } from "./session-store.js";
+import { isTrusted, markTrusted } from "./trust-store.js";
 import { skillLoader, messageBus, taskManager, teammateManager } from "./tools.js";
 import { formatBusyStatus } from "./busy-status.js";
-import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, ToolApprovalDecision, ToolArgs, TokenUsage, UiBridge, UiMessage } from "./types.js";
+import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, ToolApprovalDecision, ToolArgs, TokenUsage, UiBridge, UiMessage, UserChoiceQuestion } from "./types.js";
 import { fetchOpenAIUsage, formatUsageReport, UsageRequestError } from "./usage.js";
 import { ellipsize } from "./utils.js";
 
@@ -470,6 +471,58 @@ function ApprovalPrompt({ name, lines, selectedIndex, width }: ApprovalPromptPro
       ))}
       <Text color="gray">↑/↓ to choose, Enter to confirm, Esc to reject</Text>
       <Text color="yellow" wrap="truncate">{borderRule(width)}</Text>
+    </Box>
+  );
+}
+
+type QuestionPromptProps = Readonly<{
+  questions: UserChoiceQuestion[];
+  questionIndex: number;
+  cursor: number;
+  selections: string[][];
+  width: number;
+}>;
+
+// Interactive menu for `ask_user_question`. Mirrors ApprovalPrompt but renders
+// one question at a time, supporting single-choice and multi-select questions.
+function QuestionPrompt({ questions, questionIndex, cursor, selections, width }: QuestionPromptProps) {
+  const question = questions[questionIndex];
+  if (!question) {
+    return null;
+  }
+  const multi = Boolean(question.multiSelect);
+  const selected = selections[questionIndex] ?? [];
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text color="cyan" wrap="truncate">{borderRule(width)}</Text>
+      <Text bold color="cyan">
+        {questions.length > 1 ? `[${questionIndex + 1}/${questions.length}] ` : ""}
+        {question.header ? `${question.header}: ` : ""}
+        {question.question}
+      </Text>
+      <Newline />
+      {question.options.map((option, index) => {
+        const isCursor = cursor === index;
+        const isChecked = selected.includes(option.label);
+        const marker = multi ? (isChecked ? "[x]" : "[ ]") : isCursor ? "›" : " ";
+        return (
+          <Box key={`${option.label}-${index}`} flexDirection="column">
+            <Text color={isCursor ? "cyan" : "white"}>
+              {multi ? (isCursor ? "› " : "  ") : ""}{marker} {index + 1}. {option.label}
+            </Text>
+            {option.description ? (
+              <Text color="gray" wrap="truncate">      {option.description}</Text>
+            ) : null}
+          </Box>
+        );
+      })}
+      <Text color="gray">
+        {multi
+          ? "↑/↓ to move, Space to toggle, Enter to confirm, Esc to skip"
+          : "↑/↓ to move, 1-9 or Enter to select, Esc to skip"}
+      </Text>
+      <Text color="cyan" wrap="truncate">{borderRule(width)}</Text>
     </Box>
   );
 }
@@ -1194,7 +1247,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     lastActivityAtRef.current = null;
     return undefined;
   }, [busy]);
-  const [trusted, setTrusted] = useState<boolean | null>(null);
+  const [trusted, setTrusted] = useState<boolean | null>(() => (isTrusted(process.cwd()) ? true : null));
   /**
    * Startup can begin with a fully resolved model when either:
    * - the user set `MODEL_ID` for this shell session, or
@@ -1239,6 +1292,13 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
   const [approvalSelection, setApprovalSelection] = useState(0);
   const approvalResolverRef = useRef<((decision: ToolApprovalDecision) => void) | null>(null);
   const alwaysAllowToolsRef = useRef<Set<string>>(new Set());
+  // Human-in-the-loop choice prompt (`ask_user_question`). Questions are answered
+  // one at a time; `questionSelections[i]` holds the chosen labels for question i.
+  const [pendingQuestion, setPendingQuestion] = useState<UserChoiceQuestion[] | null>(null);
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [questionCursor, setQuestionCursor] = useState(0);
+  const [questionSelections, setQuestionSelections] = useState<string[][]>([]);
+  const questionResolverRef = useRef<((answers: string[][]) => void) | null>(null);
   const agentStateRef = useRef<AgentState>({
     ...(startupResume.snapshot?.state ?? {
       sessionId: createSessionId(),
@@ -1427,6 +1487,16 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         setPendingApproval({ name, args, lines: summarizeApprovalTarget(name, args) });
       });
     },
+    requestUserChoice(questions) {
+      finalizeStreaming();
+      return new Promise<string[][]>((resolve) => {
+        questionResolverRef.current = resolve;
+        setQuestionIndex(0);
+        setQuestionCursor(0);
+        setQuestionSelections(questions.map(() => []));
+        setPendingQuestion(questions);
+      });
+    },
   };
 
   // Settle a pending approval and tear down the overlay. `alwaysAllowName`, when
@@ -1440,6 +1510,18 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     setPendingApproval(null);
     setApprovalSelection(0);
     resolve?.(decision);
+  };
+
+  // Settle a pending question prompt and tear down the overlay, handing the
+  // collected per-question selections back to the awaiting agent loop.
+  const resolveQuestion = (answers: string[][]) => {
+    const resolve = questionResolverRef.current;
+    questionResolverRef.current = null;
+    setPendingQuestion(null);
+    setQuestionIndex(0);
+    setQuestionCursor(0);
+    setQuestionSelections([]);
+    resolve?.(answers);
   };
 
   const resetConversation = (snapshot?: SessionSnapshot) => {
@@ -1507,6 +1589,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
   const acceptTrust = () => {
     setTrusted(true);
+    markTrusted(process.cwd());
     if (modelSelected) {
       // env var already set, skip selection
       if (!currentResolved) ensureConfig();
@@ -2202,6 +2285,57 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       return;
     }
 
+    if (pendingQuestion) {
+      const question = pendingQuestion[questionIndex];
+      if (!question) {
+        return;
+      }
+      const optionCount = question.options.length;
+      const multi = Boolean(question.multiSelect);
+
+      // Persist `next` selections, then advance to the next question or finish.
+      const commitAndAdvance = (next: string[][]) => {
+        if (questionIndex + 1 < pendingQuestion.length) {
+          setQuestionSelections(next);
+          setQuestionIndex(questionIndex + 1);
+          setQuestionCursor(0);
+        } else {
+          resolveQuestion(next);
+        }
+      };
+
+      if (key.escape) {
+        // Skip the rest: answered questions keep their picks, unanswered stay empty.
+        resolveQuestion(questionSelections.map((selection) => selection ?? []));
+      } else if (key.upArrow || input === "k") {
+        setQuestionCursor((c) => (c - 1 + optionCount) % optionCount);
+      } else if (key.downArrow || input === "j") {
+        setQuestionCursor((c) => (c + 1) % optionCount);
+      } else if (multi && input === " ") {
+        setQuestionSelections((prev) => {
+          const next = prev.map((selection) => [...selection]);
+          const label = question.options[questionCursor].label;
+          const current = next[questionIndex] ?? [];
+          const at = current.indexOf(label);
+          if (at >= 0) current.splice(at, 1);
+          else current.push(label);
+          next[questionIndex] = current;
+          return next;
+        });
+      } else if (!multi && /^[1-9]$/.test(input) && Number(input) <= optionCount) {
+        const next = questionSelections.map((selection) => [...selection]);
+        next[questionIndex] = [question.options[Number(input) - 1].label];
+        commitAndAdvance(next);
+      } else if (key.return) {
+        const next = questionSelections.map((selection) => [...selection]);
+        if (!multi) {
+          next[questionIndex] = [question.options[questionCursor].label];
+        }
+        commitAndAdvance(next);
+      }
+      return;
+    }
+
     if (busy) {
       if (key.escape) {
         requestActiveTurnStop();
@@ -2351,7 +2485,15 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
           <Box flexDirection="column" width="100%" flexShrink={0}>
             <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
             <StatusBar width={innerWidth} busy={busy} state={agentStateRef.current} tokenUsage={totalTokenUsage} />
-            {pendingApproval ? (
+            {pendingQuestion ? (
+              <QuestionPrompt
+                questions={pendingQuestion}
+                questionIndex={questionIndex}
+                cursor={questionCursor}
+                selections={questionSelections}
+                width={innerWidth}
+              />
+            ) : pendingApproval ? (
               <ApprovalPrompt name={pendingApproval.name} lines={pendingApproval.lines} selectedIndex={approvalSelection} width={innerWidth} />
             ) : busy ? (
               <BusyStatusLine

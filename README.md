@@ -177,6 +177,11 @@ Providers are configured in `~/.xbcode/settings.json`:
       "auth": {
         "type": "oauth"
       }
+    },
+    "aliyun": {
+      "models": ["qwen-plus", "qwen-turbo", "qwen-max"],
+      "apiKey": "sk-xxx",
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
   },
   "defaultProvider": "openai",

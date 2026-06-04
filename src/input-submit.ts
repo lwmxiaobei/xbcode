@@ -10,6 +10,10 @@ export type SubmitDeduper = {
  * 从一次输入事件中提取“应当立即提交”的文本。
  * 正常终端会把 Enter 解析成 `key.return`，但有些环境会把整行内容连同换行一起塞进 `input`。
  * 这里统一把两种情况折叠成同一种提交值，避免 `/exit` 之类的命令只进入输入框而不执行。
+ *
+ * 注意：多行粘贴会把“文本 + 换行 + 后续文本”一并塞进 input。
+ * 这种情况下绝不能当作 Enter 提交，否则会出现“第一行被自动发送、剩余还在输入框”的 bug。
+ * 判定方法：只有当换行符之后再无任何非换行字符时，才视作 Enter 兜底。
  */
 export function getSubmittedValueFromInput(currentValue: string, input: string, keyReturn: boolean): string | null {
   if (keyReturn) {
@@ -18,6 +22,11 @@ export function getSubmittedValueFromInput(currentValue: string, input: string, 
 
   const firstLineBreak = input.search(/[\r\n]/);
   if (firstLineBreak === -1) {
+    return null;
+  }
+
+  const tail = input.slice(firstLineBreak).replace(/[\r\n]/g, "");
+  if (tail.length > 0) {
     return null;
   }
 

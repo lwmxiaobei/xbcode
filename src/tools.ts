@@ -992,10 +992,54 @@ export const TEAMMATE_SHUTDOWN_TOOL = {
   },
 } as const;
 
+// 模型在需要用户拍板（方案选型、歧义澄清、确认偏好）时调用此工具。
+// 它不在 BASE_TOOL_HANDLERS 注册：执行需要 UiBridge，由 agent loop 层拦截分发。
+export const ASK_USER_QUESTION_TOOL = {
+  type: "function",
+  name: "ask_user_question",
+  description:
+    "Ask the user one or more multiple-choice questions when you need a decision you cannot make from the request, the code, or sensible defaults. Use only when the answer changes what you do next — not for choices with an obvious default. The user can always pick 'Other' to type a custom answer.",
+  parameters: {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        description: "1-4 questions to ask the user.",
+        items: {
+          type: "object",
+          properties: {
+            header: { type: "string", description: "Very short label for the question (max ~12 chars)." },
+            question: { type: "string", description: "The full question text, ending with a question mark." },
+            multiSelect: { type: "boolean", description: "Allow selecting multiple options. Defaults to false (single choice)." },
+            options: {
+              type: "array",
+              description: "2-4 distinct choices.",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string", description: "Concise display text for the choice." },
+                  description: { type: "string", description: "Optional explanation of what this choice means or implies." },
+                },
+                required: ["label"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["header", "question", "options"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["questions"],
+    additionalProperties: false,
+  },
+} as const;
+
 // 主 agent 可以看到全部工具：基础工具 + 子任务 + 团队协作。
 // P1 删除 LEAD_INBOX_TOOL：lead 邮箱由 runOneTurn 自动注入，不再需要 lead 主动「查邮箱」。
 export const TOOLS = [
   ...BASE_TOOLS,
+  ASK_USER_QUESTION_TOOL,
   TASK_TOOL,
   TEAM_MESSAGE_TOOL,
   TEAMMATE_SPAWN_TOOL,

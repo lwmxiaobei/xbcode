@@ -69,6 +69,11 @@ npm run dev
       "apiKey": "ak_xxxxxxx", // 去申请美团的龙猫模型，每天几百万的免费额度，足够测试开发了
       "baseURL": "https://api.longcat.chat/openai",
       "apiMode": "chat-completions"
+    },
+    "aliyun": {
+      "models": ["qwen-plus", "qwen-turbo", "qwen-max"],
+      "apiKey": "sk-xxx", // 阿里云百炼 API Key: https://dashscope.console.aliyun.com/
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
   },
   "defaultProvider": "openai",

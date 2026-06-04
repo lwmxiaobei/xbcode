@@ -53,6 +53,20 @@ export type TokenUsage = {
 
 export type ToolApprovalDecision = "approved" | "rejected";
 
+// 模型通过 `ask_user_question` 工具向用户发起的一道选择题。
+// 对齐 Claude Code 的 AskUserQuestion：每题 2-4 个选项，可单选或多选。
+export type UserChoiceOption = {
+  label: string;
+  description?: string;
+};
+
+export type UserChoiceQuestion = {
+  header: string;
+  question: string;
+  multiSelect?: boolean;
+  options: UserChoiceOption[];
+};
+
 export type UiBridge = {
   appendAssistantDelta(delta: string): void;
   appendThinkingDelta(delta: string): void;
@@ -68,4 +82,8 @@ export type UiBridge = {
   // Human-in-the-loop gate: the loop calls this before running a mutating tool.
   // Implementations may auto-approve (e.g. sub-agents) or prompt the user.
   requestToolApproval(name: string, args: ToolArgs): Promise<ToolApprovalDecision>;
+  // 模型主动发问的 human-in-the-loop：渲染交互式选择菜单并阻塞，等待用户作答。
+  // 返回值与 `questions` 一一对应，每项是该题被选中的选项 label 列表（多选可多个）。
+  // 自治 agent（子代理 / teammate）无人可问，实现应返回确定性默认值（各题首选项）。
+  requestUserChoice(questions: UserChoiceQuestion[]): Promise<string[][]>;
 };

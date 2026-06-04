@@ -9,13 +9,14 @@ import {
   TOKEN_THRESHOLD,
 } from "./compact.js";
 import { isTransientNetworkError } from "./http.js";
+import { combineAbortSignals, createIdleWatchdog, getStreamIdleTimeoutMs } from "./idle-watchdog.js";
 import { logApiError, wrapApiError } from "./error-log.js";
 import { getDynamicMcpToolSurface } from "./mcp/runtime.js";
 import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, BASE_CHAT_TOOLS, TEAMMATE_TOOLS, TEAMMATE_CHAT_TOOLS, BASE_TOOL_HANDLERS, taskManager } from "./tools.js";
 import { formatTeammateMessages } from "./message-bus.js";
 import { getSubagentDefinition, type SubagentDefinition } from "./subagents.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";
-import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ToolApprovalDecision } from "./types.js";
+import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ToolApprovalDecision, UserChoiceQuestion, UserChoiceOption } from "./types.js";
 
 // P1：删除 MailboxEventType / MAILBOX_EVENT_TYPES / normalizeEventType。
 // 这些是 P3 协议消息字段，从 P1 阶段的 MailboxMessage 中已彻底移除。
@@ -85,6 +86,64 @@ function toolNeedsApproval(name: string): boolean {
 // call, so the tool-call/result pairing stays valid and the model re-plans.
 function buildToolRejectionOutput(name: string): string {
   return `Rejected by user: the tool "${name}" was not run. Do not retry it. Ask the user how they would like to proceed.`;
+}
+
+// `ask_user_question` 的执行不走 BASE_TOOL_HANDLERS：它必须经 UiBridge 弹出交互菜单，
+// 因此和工具审批一样在 agent loop 层拦截。下面三个辅助函数负责：解析模型给的脏参数、
+// 调 bridge 阻塞等待用户作答、把结果序列化成模型可读的 tool output。
+export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
+
+export function parseUserChoiceQuestions(raw: unknown): UserChoiceQuestion[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const questions: UserChoiceQuestion[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const obj = item as Record<string, unknown>;
+    const header = String(obj.header ?? "").trim();
+    const question = String(obj.question ?? "").trim();
+    const rawOptions = Array.isArray(obj.options) ? obj.options : [];
+    const options: UserChoiceOption[] = [];
+    for (const opt of rawOptions) {
+      if (!opt || typeof opt !== "object") {
+        continue;
+      }
+      const o = opt as Record<string, unknown>;
+      const label = String(o.label ?? "").trim();
+      if (!label) {
+        continue;
+      }
+      const description = o.description != null ? String(o.description) : undefined;
+      options.push(description ? { label, description } : { label });
+    }
+    if (!question || options.length === 0) {
+      continue;
+    }
+    questions.push({ header, question, multiSelect: Boolean(obj.multiSelect), options });
+  }
+  return questions;
+}
+
+export function formatUserChoiceResult(questions: UserChoiceQuestion[], answers: string[][]): string {
+  const blocks = questions.map((question, index) => {
+    const selected = (answers[index] ?? []).filter((label) => label.trim().length > 0);
+    const selectedText = selected.length > 0 ? selected.join(", ") : "(no selection)";
+    return `Q: ${question.question}\nSelected: ${selectedText}`;
+  });
+  return `The user answered the question(s):\n\n${blocks.join("\n\n")}`;
+}
+
+async function runAskUserQuestion(args: ToolArgs, bridge: UiBridge): Promise<string> {
+  const questions = parseUserChoiceQuestions(args.questions);
+  if (questions.length === 0) {
+    return 'Error: ask_user_question requires a non-empty "questions" array; each question needs a "question" string and at least one option with a "label".';
+  }
+  const answers = await bridge.requestUserChoice(questions);
+  return formatUserChoiceResult(questions, answers);
 }
 
 /**
@@ -411,6 +470,12 @@ function createSilentBridge(): UiBridge {
     requestToolApproval() {
       return Promise.resolve<ToolApprovalDecision>("approved");
     },
+    // 自治 agent 无人可问：对每道题返回首选项作为确定性默认答案。
+    requestUserChoice(questions: UserChoiceQuestion[]) {
+      return Promise.resolve(
+        questions.map((question) => (question.options[0] ? [question.options[0].label] : [])),
+      );
+    },
   };
 }
 
@@ -552,10 +617,18 @@ async function streamResponse(
   const normalizedInstructions = system.trim() || "You are a helpful coding assistant.";
   const normalizedInput = normalizeResponseInput(inputItems);
 
+  const idleTimeoutMs = getStreamIdleTimeoutMs();
+
   let attempt = 0;
   // 仅 attempt 0 时为 false。一旦任何字节通过 bridge 推到 UI，就不能再重试，
   // 否则用户会看到同一段文本被重复 append。
   while (true) {
+  // 每个 attempt 一个新 watchdog。它的 signal 会和 user signal 合并传给 SDK，
+  // 任意一端 abort 都会触发 SDK 取消请求；catch 时通过 `watchdog.triggered`
+  // 标志区分"用户 Esc"还是"watchdog 自动 abort"。
+  const watchdog = createIdleWatchdog(idleTimeoutMs);
+  const requestSignal = combineAbortSignals([control?.signal, watchdog.signal]);
+
   const stream = client.responses.stream({
     model,
     instructions: normalizedInstructions,
@@ -567,7 +640,10 @@ async function streamResponse(
     store: false,
     previous_response_id: previousResponseId,
     tools: tools as any,
-  }, control?.signal ? { signal: control.signal } : undefined);
+  }, requestSignal ? { signal: requestSignal } : undefined);
+  // 请求发出后立刻 arm watchdog。第一个字节最久允许 idleTimeoutMs 出现，
+  // 这样"建立 TCP 但服务端完全不发数据"的情况也能被兜住。
+  watchdog.reset();
 
   let responseId: string | undefined;
   let assistantText = "";
@@ -612,6 +688,7 @@ async function streamResponse(
       // 心跳：任何 SDK 事件都算"流还活着"，包括 reasoning_*.delta 这类
       // 不一定渲染到 UI 的事件。让 UI 能区分"模型在 thinking"和"连接 stall"。
       bridge.noteStreamActivity();
+      watchdog.reset();
 
       if (event.type === "response.created") {
         responseId = String(event.response?.id ?? responseId ?? "");
@@ -714,6 +791,7 @@ async function streamResponse(
     }
 
     const response = await stream.finalResponse();
+    watchdog.disarm();
     if (response.usage) {
       onUsage?.(extractTokenUsage(response.usage));
     }
@@ -765,7 +843,34 @@ async function streamResponse(
       output: rebuiltOutput,
     };
   } catch (error) {
+    watchdog.disarm();
     bridge.finalizeStreaming();
+    // 必须在 user-abort 判断之前处理 watchdog 触发：watchdog 也走的是
+    // AbortController，SDK 会抛 APIUserAbortError，但语义上不是用户主动停。
+    if (watchdog.triggered && !control?.signal?.aborted) {
+      // 已经流出过字节就不重试——重试会让 UI 出现重复段。
+      // 这种情况只能交给上层（最终 throw 一个明确的 stalled error）。
+      if (attempt < STREAM_MAX_RETRIES && !streamedToBridge) {
+        await sleep(STREAM_RETRY_DELAYS_MS[attempt] ?? STREAM_RETRY_DELAYS_MS[STREAM_RETRY_DELAYS_MS.length - 1]);
+        attempt += 1;
+        continue;
+      }
+      const stalledError = new Error(
+        `Stream stalled: no SSE event for ${idleTimeoutMs}ms (set STREAM_IDLE_TIMEOUT_MS=0 to disable, or a larger value to tolerate slower reasoning models).`,
+      );
+      logApiError(caller, stalledError, {
+        api: "responses",
+        model,
+        previousResponseId,
+        toolCount: tools.length,
+        inputItemCount: normalizedInput.length,
+        inputCharCount: JSON.stringify(normalizedInput).length,
+        showThinking,
+        idleTimeoutMs,
+        streamedToBridge,
+      });
+      throw stalledError;
+    }
     if (error instanceof APIUserAbortError || control?.signal?.aborted) {
       throw new TurnInterruptedError({
         responseId,
@@ -822,6 +927,8 @@ async function streamChatCompletion(
     createParams.thinking = { type: "enabled" };
   }
 
+  const idleTimeoutMs = getStreamIdleTimeoutMs();
+
   let attempt = 0;
   while (true) {
     let content = "";
@@ -829,13 +936,29 @@ async function streamChatCompletion(
     let streamedToBridge = false;
     const toolCallBuffers: Record<number, { id: string; type: "function"; function: { name: string; arguments: string } }> = {};
 
+    // 每个 attempt 一个新 watchdog。和 streamResponse 同样的策略：
+    // SDK 收到 abort 后会抛 APIUserAbortError，catch 时 watchdog.triggered 优先判断。
+    const watchdog = createIdleWatchdog(idleTimeoutMs);
+    const requestSignal = combineAbortSignals([control?.signal, watchdog.signal]);
+
     let stream: any;
     try {
+      // 建立连接前 arm watchdog —— 兜住"connect 完成但服务端永不发任何 chunk"。
+      watchdog.reset();
       stream = await client.chat.completions.create(
         createParams as any,
-        control?.signal ? { signal: control.signal } : undefined,
+        requestSignal ? { signal: requestSignal } : undefined,
       ) as any;
     } catch (error) {
+      watchdog.disarm();
+      if (watchdog.triggered && !control?.signal?.aborted) {
+        if (attempt < STREAM_MAX_RETRIES) {
+          await sleep(STREAM_RETRY_DELAYS_MS[attempt] ?? STREAM_RETRY_DELAYS_MS[STREAM_RETRY_DELAYS_MS.length - 1]);
+          attempt += 1;
+          continue;
+        }
+        throw new Error(`Stream stalled before first event: no response for ${idleTimeoutMs}ms`);
+      }
       if (error instanceof APIUserAbortError || control?.signal?.aborted) {
         throw new TurnInterruptedError({});
       }
@@ -865,6 +988,7 @@ async function streamChatCompletion(
         // `reasoning_content` chunk，但用户没开 SHOW_THINKING 时 UI 不渲染——
         // 没有心跳的话，外部就以为"卡死"了。
         bridge.noteStreamActivity();
+        watchdog.reset();
 
         if (chunk.usage) {
           onUsage?.(extractTokenUsage(chunk.usage));
@@ -901,6 +1025,7 @@ async function streamChatCompletion(
         }
       }
 
+      watchdog.disarm();
       bridge.finalizeStreaming();
 
       const toolCalls = Object.keys(toolCallBuffers)
@@ -913,7 +1038,30 @@ async function streamChatCompletion(
         reasoning_content: reasoningContent || undefined,
       };
     } catch (error) {
+      watchdog.disarm();
       bridge.finalizeStreaming();
+      // watchdog 优先：和 streamResponse 同样的理由。
+      if (watchdog.triggered && !control?.signal?.aborted) {
+        if (attempt < STREAM_MAX_RETRIES && !streamedToBridge) {
+          await sleep(STREAM_RETRY_DELAYS_MS[attempt] ?? STREAM_RETRY_DELAYS_MS[STREAM_RETRY_DELAYS_MS.length - 1]);
+          attempt += 1;
+          continue;
+        }
+        const stalledError = new Error(
+          `Stream stalled: no SSE event for ${idleTimeoutMs}ms (set STREAM_IDLE_TIMEOUT_MS=0 to disable, or a larger value to tolerate slower reasoning models).`,
+        );
+        logApiError(caller, stalledError, {
+          api: "chat-completions",
+          model,
+          toolCount: tools.length,
+          inputItemCount: history.length,
+          inputCharCount: JSON.stringify(history).length,
+          showThinking,
+          idleTimeoutMs,
+          streamedToBridge,
+        });
+        throw stalledError;
+      }
       if (error instanceof APIUserAbortError || control?.signal?.aborted) {
         throw new TurnInterruptedError({
           partialAssistantText: content || undefined,
@@ -951,6 +1099,17 @@ async function runToolCall(
   const name = String(toolCall.name ?? toolCall.function?.name ?? "unknown_tool");
   const rawArgs = String(toolCall.arguments ?? toolCall.function?.arguments ?? "{}");
   const args = safeJsonParse(rawArgs);
+
+  // ask_user_question 自带交互，不经审批，由 bridge 直接驱动 UI 并等待用户作答。
+  if (name === ASK_USER_QUESTION_TOOL_NAME) {
+    const output = await runAskUserQuestion(args, bridge);
+    bridge.pushTool(name, args, output);
+    return {
+      type: "function_call_output",
+      call_id: toolCall.call_id,
+      output,
+    };
+  }
 
   if (requireApproval && toolNeedsApproval(name)) {
     const decision = await bridge.requestToolApproval(name, args);
@@ -1473,7 +1632,9 @@ async function agentLoopWithChatCompletions(
       const args = safeJsonParse(String(toolCall.function?.arguments ?? "{}"));
 
       let outputText: string;
-      if (toolNeedsApproval(name) && (await bridge.requestToolApproval(name, args)) === "rejected") {
+      if (name === ASK_USER_QUESTION_TOOL_NAME) {
+        outputText = await runAskUserQuestion(args, bridge);
+      } else if (toolNeedsApproval(name) && (await bridge.requestToolApproval(name, args)) === "rejected") {
         outputText = buildToolRejectionOutput(name);
       } else {
         const handler = handlers[name];
