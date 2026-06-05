@@ -35,6 +35,7 @@ import {
   resolveProviderAuthState,
   resolveRuntimeAuth,
   writeCredentialsFile,
+  writeSettingsFile,
   updateProviderModels,
   type ProviderAuthState,
   type ResolvedConfig,
@@ -1614,6 +1615,19 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     setModelSelected(true);
     setUserHasChosenModel(true);
     primeMcpRuntime();
+
+    // 保存选择的模型和 provider 到配置文件
+    const settingsPath = getSettingsPath();
+    const currentSettings = loadSettings();
+    const updatedSettings = {
+      ...currentSettings,
+      defaultProvider: choice.provider,
+      defaultModel: choice.modelId,
+    };
+    writeSettingsFile(settingsPath, updatedSettings).catch(() => {
+      // 保存失败不影响正常使用
+    });
+
     if (isInitialSelection && messagesRef.current.length <= 1) {
       messagesRef.current = [headerItem()];
       setMessages(messagesRef.current);
