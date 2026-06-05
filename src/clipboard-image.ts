@@ -98,13 +98,42 @@ export async function importClipboardImageMacos(): Promise<ImageAttachment> {
   ensureTmpDir();
   const targetPath = path.join(TMP_DIR, `clipboard-${Date.now()}.png`);
 
+  // Read the PNG data off the macOS clipboard (NSPasteboard) via AppleScript.
+  // This avoids depending on an external tool like `pngpaste` — osascript ships
+  // with macOS, so clipboard image import works out of the box.
+  const script = [
+    "on run argv",
+    "  set outPath to item 1 of argv",
+    "  set theFile to (POSIX file outPath)",
+    "  try",
+    "    set pngData to (the clipboard as «class PNGf»)",
+    "  on error",
+    '    return "NO_IMAGE"',
+    "  end try",
+    "  set fh to open for access theFile with write permission",
+    "  try",
+    "    set eof fh to 0",
+    "    write pngData to fh",
+    "    close access fh",
+    "  on error errMsg",
+    "    try",
+    "      close access fh",
+    "    end try",
+    "    error errMsg",
+    "  end try",
+    '  return "OK"',
+    "end run",
+  ].join("\n");
+
+  let outcome = "";
   try {
-    await execFileAsync("pngpaste", [targetPath]);
+    const { stdout } = await execFileAsync("osascript", ["-e", script, targetPath]);
+    outcome = stdout.trim();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("ENOENT")) {
-      throw new Error("pngpaste is not installed. Install it with: brew install pngpaste");
-    }
+    throw new Error("Failed to read clipboard image via osascript.");
+  }
+
+  if (outcome !== "OK") {
     throw new Error("Clipboard does not contain an image.");
   }
 

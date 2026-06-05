@@ -2,16 +2,16 @@
   "name": "@lwmxiaobei/xbcode",
   "version": "1.0.1",
   "private": false,
-  "description": "xbcode CLI agent",
+  "description": "Xbcode CLI agent",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/lwmxiaobei/agent-mini.git"
+    "url": "git+https://github.com/lwmxiaobei/xbcode.git"
   },
-  "homepage": "https://github.com/lwmxiaobei/agent-mini#readme",
+  "homepage": "https://github.com/lwmxiaobei/xbcode#readme",
   "bugs": {
-    "url": "https://github.com/lwmxiaobei/agent-mini/issues"
+    "url": "https://github.com/lwmxiaobei/xbcode/issues"
   },
   "engines": {
     "node": ">=20"
@@ -45,7 +45,6 @@
     "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {
-    "@lwmxiaobei/xbcode": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.28.0",
     "@types/react": "^19.2.14",
     "dotenv": "^16.6.1",
