@@ -19,8 +19,26 @@ const defaultSettings = {
       baseURL: "https://api.openai.com/v1",
       apiMode: "responses",
     },
+    volcengine: {
+      models: [
+        { id: "doubao-seed-2.0-code", name: "Doubao Seed 2.0 Code" },
+        { id: "doubao-seed-2.0-pro", name: "Doubao Seed 2.0 Pro" },
+        { id: "doubao-seed-2.0-lite", name: "Doubao Seed 2.0 Lite" },
+        { id: "doubao-seed-code", name: "Doubao Seed Code" },
+        { id: "minimax-m2.7", name: "MiniMax M2.7" },
+        { id: "minimax-m3", name: "MiniMax M3" },
+        { id: "glm-5.1", name: "GLM 5.1" },
+        { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+        { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+        { id: "kimi-k2.6", name: "Kimi K2.6" },
+      ],
+      apiKey: "",
+      baseURL: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      apiMode: "chat-completions",
+    },
   },
-  defaultProvider: "openai",
+  defaultProvider: "volcengine",
+  defaultModel: "doubao-seed-2.0-code",
   showThinking: false,
 };
 

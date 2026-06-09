@@ -26,6 +26,7 @@ const NAG_MESSAGE = "<reminder>Update your tasks with task_list or task_update.<
 const RESPONSES_COMPACT_INTERVAL = 20;
 const STREAM_MAX_RETRIES = 2;
 const STREAM_RETRY_DELAYS_MS = [200, 800] as const;
+const INTERRUPTED_RESPONSES_CONTEXT_LIMIT = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,6 +57,26 @@ export class TurnInterruptedError extends Error {
 
 export function isTurnInterruptedError(error: unknown): error is TurnInterruptedError {
   return error instanceof TurnInterruptedError;
+}
+
+class ResponseStreamError extends Error {
+  responseId?: string;
+  partialAssistantText?: string;
+
+  constructor(caller: string, error: unknown, options?: { responseId?: string; partialAssistantText?: string }) {
+    const wrapped = wrapApiError(caller, error);
+    super(wrapped.message, { cause: error });
+    this.name = wrapped.name;
+    this.responseId = options?.responseId;
+    this.partialAssistantText = options?.partialAssistantText;
+
+    const src = wrapped as Error & { status?: number; headers?: unknown; error?: unknown; code?: unknown };
+    const dst = this as Error & { status?: number; headers?: unknown; error?: unknown; code?: unknown };
+    if (src.status !== undefined) dst.status = src.status;
+    if (src.headers !== undefined) dst.headers = src.headers;
+    if (src.error !== undefined) dst.error = src.error;
+    if (src.code !== undefined) dst.code = src.code;
+  }
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -229,6 +250,19 @@ function buildUserResponseMessage(text: string, attachments: ImageAttachment[] =
   };
 }
 
+function buildAssistantResponseMessage(text: string): ResponseInputItem {
+  return {
+    type: "message",
+    role: "assistant",
+    content: [
+      {
+        type: "output_text",
+        text,
+      },
+    ],
+  };
+}
+
 /**
  * 在 Responses 模式切链后的首轮请求里，把 compact 摘要显式拼回用户输入。
  *
@@ -239,6 +273,40 @@ function buildUserResponseMessage(text: string, attachments: ImageAttachment[] =
  */
 function buildCompactedResponsesQuery(summary: string, query: string): string {
   return `${summary}\n\nCurrent user request:\n${query}`;
+}
+
+function truncateContextText(text: string, limit = INTERRUPTED_RESPONSES_CONTEXT_LIMIT): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit)}\n\n[truncated interrupted context: ${text.length - limit} chars omitted]`;
+}
+
+function formatResponseReplayItemForContext(item: ResponseInputItem): string {
+  const type = String(item.type ?? "");
+  if (type === "message") {
+    const role = String(item.role ?? "unknown");
+    return `${role}:\n${extractAssistantText(item.content)}`;
+  }
+  if (type === "function_call") {
+    return `assistant tool call ${String(item.name ?? "unknown_tool")}:\n${String(item.arguments ?? "")}`;
+  }
+  if (type === "function_call_output") {
+    return `tool result ${String(item.call_id ?? "")}:\n${String(item.output ?? "")}`;
+  }
+  return `${type || "item"}:\n${JSON.stringify(item)}`;
+}
+
+function buildInterruptedResponsesContext(items: ResponseInputItem[]): string {
+  const body = items
+    .map((item, index) => `Item ${index + 1} ${formatResponseReplayItemForContext(item)}`)
+    .join("\n\n");
+  return truncateContextText([
+    "The previous Responses API turn was interrupted before it could be committed to the server-side conversation chain.",
+    "These model-visible items had already happened in that interrupted turn.",
+    body,
+    "If the current user asks to continue, continue from the interrupted turn instead of restarting the plan.",
+  ].join("\n\n"));
 }
 
 function buildChatUserMessageContent(text: string, attachments: ImageAttachment[] = []): string | Array<Record<string, unknown>> {
@@ -896,7 +964,10 @@ async function streamResponse(
       inputCharCount: JSON.stringify(normalizedInput).length,
       showThinking,
     });
-    throw wrapApiError(caller, error);
+    throw new ResponseStreamError(caller, error, {
+      responseId,
+      partialAssistantText: assistantText || undefined,
+    });
   }
   }
 }
@@ -1489,6 +1560,7 @@ async function agentLoop(
    * - `/resume`、状态栏估算、手动 `/compact` 也都依赖同一份本地上下文副本。
    * - 真正请求模型时，只有 stateless 分支会重放它，因此不会改变支持服务端链路的正常交互成本。
    */
+  const baseReplayHistoryLength = state.responseHistory.length;
   const replayHistory = [
     ...state.responseHistory.map((item) => cloneResponseReplayItem(item)),
     buildUserResponseMessage(query, attachments),
@@ -1501,19 +1573,34 @@ async function agentLoop(
   while (true) {
     throwIfAborted(control?.signal);
 
-    const response = await streamResponse(
-      config.client,
-      config.model,
-      config.system,
-      config.showThinking,
-      nextInput,
-      currentResponseId,
-      bridge,
-      tools,
-      control,
-      onUsage,
-      caller,
-    );
+    let response;
+    try {
+      response = await streamResponse(
+        config.client,
+        config.model,
+        config.system,
+        config.showThinking,
+        nextInput,
+        currentResponseId,
+        bridge,
+        tools,
+        control,
+        onUsage,
+        caller,
+      );
+    } catch (error) {
+      if (error instanceof ResponseStreamError) {
+        const interruptedHistory = replayHistory.map((item) => cloneResponseReplayItem(item));
+        if (error.partialAssistantText) {
+          interruptedHistory.push(buildAssistantResponseMessage(error.partialAssistantText));
+        }
+        state.responseHistory = interruptedHistory;
+        if (!usesStatelessReplay) {
+          state.pendingCompactedContext = buildInterruptedResponsesContext(interruptedHistory.slice(baseReplayHistoryLength));
+        }
+      }
+      throw error;
+    }
     currentResponseId = response.id;
 
     replayHistory.push(...collectReplayableResponseOutput(response.output));

@@ -34,18 +34,59 @@ function pickHeader(headers: unknown, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function describeError(error: unknown): Record<string, unknown> {
+function sanitizeForLog(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (seen.has(value)) {
+    return "[Circular]";
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForLog(item, seen));
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = sanitizeForLog(item, seen);
+  }
+  return output;
+}
+
+function compactStack(stack: unknown): string | undefined {
+  if (typeof stack !== "string" || !stack.trim()) {
+    return undefined;
+  }
+  return stack.split("\n").slice(0, 12).join("\n");
+}
+
+export function describeError(error: unknown, depth = 0): Record<string, unknown> {
   if (!error || typeof error !== "object") {
     return { message: String(error) };
   }
-  const err = error as Record<string, unknown> & { message?: string; status?: number; headers?: unknown; error?: unknown };
-  return {
+  const err = error as Record<string, unknown> & {
+    message?: string;
+    status?: number;
+    headers?: unknown;
+    error?: unknown;
+    cause?: unknown;
+    code?: unknown;
+    stack?: unknown;
+  };
+  const result: Record<string, unknown> = {
     name: (err as { name?: string }).name,
     message: err.message,
+    code: typeof err.code === "string" ? err.code : undefined,
     status: err.status,
     requestId: pickHeader(err.headers, "x-request-id"),
-    body: err.error,
+    body: sanitizeForLog(err.error),
+    stack: compactStack(err.stack),
   };
+  if (err.cause !== undefined) {
+    result.cause = depth >= 4
+      ? { message: "Cause depth limit reached." }
+      : describeError(err.cause, depth + 1);
+  }
+  return result;
 }
 
 /**

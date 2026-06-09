@@ -2,7 +2,7 @@
 
 # xbcode
 
-`xbcode` is a TypeScript-based CLI coding agent built with OpenAI SDK and Ink. It runs in the terminal, streams model output, executes tools inside the current workspace, supports persistent tasks, skills, MCP integration, and lightweight multi-agent teamwork.
+`xbcode` is a TypeScript-based CLI coding agent built with OpenAI SDK and Ink. It runs in the terminal, streams model output, executes local tools, supports persistent tasks, skills, MCP integration, and lightweight multi-agent teamwork.
 
 The project is positioned as a compact, hackable alternative to heavier coding agents: small enough to read end-to-end, but already opinionated enough to be useful in day-to-day coding workflows.
 
@@ -59,13 +59,18 @@ Minimal example:
 {
   "providers": {
     "openai": {
-      "models": ["gpt-4.1", "gpt-4.1-mini", "o3-mini"],
+      "models": [
+        { "id": "gpt-4.1", "name": "GPT-4.1" },
+        { "id": "gpt-4.1-mini", "name": "GPT-4.1 Mini" },
+        { "id": "o3-mini", "name": "o3 Mini" }
+      ],
       "apiKey": "YOUR_OPENAI_API_KEY",
       "baseURL": "https://api.openai.com/v1",
       "apiMode": "responses"
     }
   },
-  "defaultProvider": "openai",
+  "defaultProvider": "volcengine",
+  "defaultModel": "doubao-seed-2.0-code",
   "showThinking": false,
   "mcp": {
     "servers": []
@@ -101,6 +106,18 @@ Read the project structure and explain how the agent loop works.
 ```
 
 If `MODEL_ID` is not preset in the environment, the CLI will guide you through interactive provider/model selection from `~/.xbcode/settings.json`.
+
+The generated default config now prefers Volcengine Ark and defaults to `doubao-seed-2.0-code`.
+
+### Web search
+
+The built-in `web_search` tool uses Brave Search API. Configure the API key in the project `.env` file or in the current shell:
+
+```bash
+BRAVE_SEARCH_API_KEY=your Brave Search API key
+```
+
+When the model needs current information, it can call `web_search` to discover candidate results and then use `web_fetch` to read selected pages.
 
 ## How It Works
 
@@ -182,6 +199,23 @@ Providers are configured in `~/.xbcode/settings.json`:
       "models": ["qwen-plus", "qwen-turbo", "qwen-max"],
       "apiKey": "sk-xxx",
       "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "volcengine": {
+      "models": [
+        { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code" },
+        { "id": "doubao-seed-2.0-pro", "name": "Doubao Seed 2.0 Pro" },
+        { "id": "doubao-seed-2.0-lite", "name": "Doubao Seed 2.0 Lite" },
+        { "id": "doubao-seed-code", "name": "Doubao Seed Code" },
+        { "id": "minimax-m2.7", "name": "MiniMax M2.7" },
+        { "id": "minimax-m3", "name": "MiniMax M3" },
+        { "id": "glm-5.1", "name": "GLM 5.1" },
+        { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+        { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+        { "id": "kimi-k2.6", "name": "Kimi K2.6" }
+      ],
+      "apiKey": "YOUR_ARK_API_KEY",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "apiMode": "chat-completions"
     }
   },
   "defaultProvider": "openai",
@@ -204,7 +238,9 @@ Key fields:
 - `auth`
   Optional provider auth mode. Today only `{ "type": "oauth" }` is supported, and only for OpenAI.
 
-API mode can be explicit, or derived automatically. For example, DeepSeek-compatible base URLs default to `chat-completions`.
+API mode can be explicit, or derived automatically. For example, DeepSeek-, DashScope-, and Volcengine Ark-compatible base URLs default to `chat-completions`.
+
+For Volcengine Ark, configure the provider with your Ark API key, use `https://ark.cn-beijing.volces.com/api/coding/v3` as `baseURL`, and put the model IDs you can access into `models`. Example IDs include `doubao-seed-2.0-code`, `doubao-seed-2.0-pro`, `doubao-seed-2.0-lite`, `doubao-seed-code`, `minimax-m2.7`, `minimax-m3`, `glm-5.1`, `deepseek-v4-flash`, `deepseek-v4-pro`, and `kimi-k2.6`.
 
 When OpenAI OAuth is enabled:
 
@@ -224,9 +260,10 @@ OAuth commands:
 
 ### Workspace behavior
 
-`xbcode` operates relative to the current working directory:
+`xbcode` uses the current working directory as its default base, but file tools are not sandboxed:
 
-- File tools are sandboxed to `process.cwd()`
+- File tools accept relative paths, `..` segments, and absolute paths
+- Relative paths resolve from `process.cwd()`
 - Shell commands run with `cwd = process.cwd()`
 - Local skills are loaded from `<workdir>/skills`
 - Team state lives under `<workdir>/.team`
@@ -558,7 +595,8 @@ Important package details:
 
 The current implementation intentionally enforces several simple constraints:
 
-- file access is restricted to the current workspace through `safePath()`
+- file access is not sandboxed to the current workspace
+- write-oriented file tools still go through tool approval in the main agent
 - shell commands have a timeout
 - very dangerous shell snippets are blocked
 - tool output is truncated to avoid blowing up context size

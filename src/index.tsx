@@ -284,6 +284,12 @@ function stripAnsi(text: string): string {
   return text.replaceAll(/\u001b\[[0-9;]*m/g, "");
 }
 
+function terminalLink(label: string, url: string): string {
+  const safeUrl = url.replaceAll("\u0007", "").replaceAll("\u001b", "");
+  const safeLabel = label.replaceAll("\u0007", "").replaceAll("\u001b", "");
+  return `\u001b]8;;${safeUrl}\u0007${safeLabel}\u001b]8;;\u0007`;
+}
+
 function toolPreview(value: string, maxLength = 400): string {
   return ellipsize(value.replaceAll(/\s+/g, " ").trim(), maxLength);
 }
@@ -544,6 +550,11 @@ function wrapTextToRows(text: string, width: number): string[] {
   const rows: string[] = [];
 
   for (const logicalLine of logicalLines) {
+    if (logicalLine.includes("\u001b]8;;")) {
+      rows.push(logicalLine.length > 0 ? logicalLine : " ");
+      continue;
+    }
+
     const wrapped = wrapAnsi(logicalLine.length > 0 ? logicalLine : " ", safeWidth, {
       hard: true,
       trim: false,
@@ -670,9 +681,25 @@ function getMessagePalette(kind: UiMessage["kind"]): { titleColor: string; bodyC
   }
 }
 
+// 用纯 ASCII（全部单宽字符）画一个戴墨镜的 😎 笑脸。纯 ASCII 的 string-width
+// 与终端实际渲染宽度一致，宽度计算可靠，不会出现之前 Block Elements 被低估、
+// 在中文终端双宽渲染后折行变形的问题。
+const LOGO_LINES = [
+  "   _________ ",
+  "  /         \\",
+  " | [==] [==] |",
+  " |           |",
+  " |   \\___/   |",
+  "  \\_________/ ",
+];
+const LOGO_WIDTH = Math.max(...LOGO_LINES.map((line) => line.length));
+
 function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[] }) {
   const contentWidth = Math.max(20, width - 4);
   const authWarning = getProviderStartupAuthWarning();
+  // 左列约占 36%（再减 paddingRight=2）。放得下完整 logo 才显示，否则隐藏让位，
+  // 配合每行 wrap="truncate"，任何窗口尺寸都不会折行变形。
+  const showLogo = Math.floor(contentWidth * 0.36) - 2 >= LOGO_WIDTH;
 
   return (
     <Box
@@ -689,17 +716,18 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
       </Box>
       <Box marginTop={1}>
         <Box width="36%" flexDirection="column" paddingRight={2}>
-          <Text bold>Welcome back{currentResolved ? ` · ${currentResolved.providerName}` : ""}</Text>
-          <Text color="gray">{ellipsize(WORKDIR, contentWidth)}</Text>
+          <Text bold wrap="truncate">Welcome back{currentResolved ? ` · ${currentResolved.providerName}` : ""}</Text>
+          <Text color="gray" wrap="truncate">{ellipsize(WORKDIR, contentWidth)}</Text>
+          {showLogo ? (
+            <>
+              <Text> </Text>
+              {LOGO_LINES.map((line, i) => (
+                <Text key={i} color="red" wrap="truncate">{line}</Text>
+              ))}
+            </>
+          ) : null}
           <Text> </Text>
-          <Text color="red">    ▟▙    ▟▙</Text>
-          <Text color="red">   ▟██▆▆▆▆██▙</Text>
-          <Text color="red"> ▗▟████████████▙▄▖</Text>
-          <Text color="red"> ▜████▀█████████▛▀▄</Text>
-          <Text color="red">  ▀▀▜██████████▛▀</Text>
-          <Text color="red">     ▏  ▏  ▏</Text>
-          <Text> </Text>
-          <Text color="gray">{currentResolved ? `${currentResolved.model} · ${currentResolved.apiMode}` : "No model selected"}</Text>
+          <Text color="gray" wrap="truncate">{currentResolved ? `${currentResolved.model} · ${currentResolved.apiMode}` : "No model selected"}</Text>
         </Box>
         <Box width={1}>
           <Text color="red">│</Text>
@@ -2091,7 +2119,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         try {
           const result = await startOpenAILogin({
             openUrl: (url) => {
-              pushMessage("system", `Open this URL to continue login:\n${url}`, "login");
+              pushMessage("system", `Open this URL to continue login:\n${terminalLink("Open OpenAI login", url)}\n\nRaw URL:\n${url}`, "login");
             },
           });
 

@@ -42,6 +42,6 @@ Configure in `.env` at project root:
 
 - JSX runtime: `react-jsx` (not classic transform)
 - Module system: ESM (`"type": "module"` in package.json, `NodeNext` in tsconfig)
-- File paths in tool handlers are sandboxed to `process.cwd()` via `safePath()`
+- File paths in tool handlers are not sandboxed. Relative paths resolve from `process.cwd()`, while `..` and absolute paths are allowed.
 - Tool outputs are truncated to 50K characters
 - Bash commands have a 120s timeout and a dangerous-command blocklist

@@ -33,9 +33,9 @@ export const taskManager = new TaskManager(path.join(WORKDIR, ".tasks"));
 export const messageBus = new MessageBus(TEAM_DIR);
 export const teammateManager = new TeammateManager(TEAM_DIR, messageBus, LEAD_NAME);
 
-// 路径解析（不再限制在工作区内）。
-function safePath(relativePath: string): string {
-  return path.resolve(WORKDIR, relativePath);
+// 路径解析不做沙箱限制：相对路径基于启动目录解析，绝对路径原样使用。
+function resolveToolPath(filePath: string): string {
+  return path.resolve(WORKDIR, filePath);
 }
 
 // child_process 的超时错误没有稳定类型，这里单独抽成守卫函数做识别。
@@ -187,10 +187,10 @@ async function runBash(command: string, signal?: AbortSignal): Promise<string> {
   }
 }
 
-// 下面三个文件工具是最基础的工作区读写能力。
+// 下面三个文件工具是最基础的本地文件读写能力。
 function runRead(filePath: string, limit?: number): string {
   try {
-    const text = fs.readFileSync(safePath(filePath), "utf8");
+    const text = fs.readFileSync(resolveToolPath(filePath), "utf8");
     let lines = text.split(/\r?\n/);
     if (limit && limit < lines.length) {
       lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
@@ -203,7 +203,7 @@ function runRead(filePath: string, limit?: number): string {
 
 function runWrite(filePath: string, content: string): string {
   try {
-    const fullPath = safePath(filePath);
+    const fullPath = resolveToolPath(filePath);
     fs.mkdirSync(path.dirname(fullPath), { recursive: true });
     fs.writeFileSync(fullPath, content, "utf8");
     return `Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${filePath}`;
@@ -254,7 +254,7 @@ function isMarkdownFile(filePath: string): boolean {
 
 function runEdit(filePath: string, oldText: string, newText: string): string {
   try {
-    const fullPath = safePath(filePath);
+    const fullPath = resolveToolPath(filePath);
     const content = fs.readFileSync(fullPath, "utf8");
 
     const actualOldText = findActualOldText(content, oldText);
@@ -350,6 +350,98 @@ export function stripHtml(html: string): string {
 const WEB_FETCH_TIMEOUT_MS = 30_000;
 const WEB_FETCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
 const WEB_FETCH_MAX_OUTPUT_CHARS = 100_000;
+const WEB_SEARCH_TIMEOUT_MS = 30_000;
+const WEB_SEARCH_MAX_RESULTS = 10;
+const WEB_SEARCH_DEFAULT_RESULTS = 5;
+
+type BraveSearchResult = {
+  title?: unknown;
+  url?: unknown;
+  description?: unknown;
+};
+
+function clampSearchCount(value: number | undefined): number {
+  if (!Number.isFinite(value)) return WEB_SEARCH_DEFAULT_RESULTS;
+  return Math.min(Math.max(Math.trunc(value as number), 1), WEB_SEARCH_MAX_RESULTS);
+}
+
+function normalizeSearchText(value: unknown): string {
+  const text = String(value ?? "").trim();
+  return text.includes("<") ? stripHtml(text) : text;
+}
+
+async function runWebSearch(query: string, countRaw?: number, signal?: AbortSignal): Promise<string> {
+  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (!apiKey) return "Error: BRAVE_SEARCH_API_KEY is not set";
+
+  const normalizedQuery = query.trim();
+  if (!normalizedQuery) return "Error: query is required";
+  if (normalizedQuery.length > 500) return "Error: query is too long (>500 chars)";
+
+  const count = clampSearchCount(countRaw);
+  const url = new URL("https://api.search.brave.com/res/v1/web/search");
+  url.searchParams.set("q", normalizedQuery);
+  url.searchParams.set("count", String(count));
+
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), WEB_SEARCH_TIMEOUT_MS);
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
+
+  let response: Response;
+  try {
+    response = await fetch(url.toString(), {
+      signal: combinedSignal,
+      headers: {
+        accept: "application/json",
+        "user-agent": "code-agent-web-search/1.0",
+        "X-Subscription-Token": apiKey,
+      },
+    });
+  } catch (error) {
+    clearTimeout(timer);
+    if (signal?.aborted) return "Error: Aborted";
+    if (timeoutController.signal.aborted) return `Error: Timeout (${WEB_SEARCH_TIMEOUT_MS / 1000}s)`;
+    return `Error: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  clearTimeout(timer);
+
+  if (!response.ok) {
+    return `Error: HTTP ${response.status} ${response.statusText || ""}`.trim();
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    return `Error: failed to parse search response: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  const obj = payload as { web?: { results?: unknown } };
+  const results = Array.isArray(obj?.web?.results)
+    ? (obj.web.results as BraveSearchResult[])
+    : [];
+  if (results.length === 0) return "No search results";
+
+  const formatted = results.slice(0, count).map((item, index) => {
+    const title = normalizeSearchText(item.title) || "(untitled)";
+    const resultUrl = normalizeSearchText(item.url);
+    const snippet = normalizeSearchText(item.description);
+    return [
+      `${index + 1}. ${title}`,
+      `URL: ${resultUrl}`,
+      `Snippet: ${snippet}`,
+    ].join("\n");
+  }).join("\n\n");
+
+  const header = [
+    `Query: ${normalizedQuery}`,
+    `Results: ${Math.min(results.length, count)}`,
+    "Provider: Brave Search",
+  ].join("\n");
+  return appendTruncationNotice(`${header}\n---\n${formatted}`);
+}
 
 async function runWebFetch(rawUrl: string, signal?: AbortSignal): Promise<string> {
   let url: URL;
@@ -439,7 +531,7 @@ function describeRgFailure(error: unknown, signal?: AbortSignal): string | null 
 // glob 工具：用 `rg --files --glob <pattern>` 列出匹配文件，再按 mtime 倒序截断到 100 条。
 // 选择 rg 而不是 Node 自己遍历，是因为 rg 尊重 .gitignore，并且在大仓库里快一个数量级。
 async function runGlob(pattern: string, relPath: string | undefined, signal?: AbortSignal): Promise<string> {
-  const searchDir = relPath ? safePath(relPath) : WORKDIR;
+  const searchDir = relPath ? resolveToolPath(relPath) : WORKDIR;
   const args = [
     "--files",
     "--glob",
@@ -529,7 +621,7 @@ async function runGrep(args: ToolArgs, signal?: AbortSignal): Promise<string> {
 
   let searchPath: string | undefined;
   if (typeof args.path === "string") {
-    searchPath = safePath(args.path);
+    searchPath = resolveToolPath(args.path);
     rgArgs.push(searchPath);
   }
 
@@ -649,7 +741,7 @@ export const BASE_TOOLS = [
         },
         path: {
           type: "string",
-          description: "Directory to search in (relative to workspace). Omit to search the whole workspace.",
+          description: "Directory to search in. Relative paths resolve from the current working directory; absolute paths are allowed. Omit to search the current working directory.",
         },
       },
       required: ["pattern"],
@@ -670,7 +762,7 @@ export const BASE_TOOLS = [
         },
         path: {
           type: "string",
-          description: "File or directory to search in. Omit to search the whole workspace.",
+          description: "File or directory to search in. Relative paths resolve from the current working directory; absolute paths are allowed. Omit to search the current working directory.",
         },
         glob: {
           type: "string",
@@ -904,6 +996,27 @@ export const BASE_TOOLS = [
         },
       },
       required: ["url"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "web_search",
+    description:
+      "Search the web and return concise results with titles, URLs, and snippets. Use web_fetch afterward to read selected pages. Requires BRAVE_SEARCH_API_KEY.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Search query.",
+        },
+        count: {
+          type: "integer",
+          description: "Number of results to return, from 1 to 10. Defaults to 5.",
+        },
+      },
+      required: ["query"],
       additionalProperties: false,
     },
   },
@@ -1160,4 +1273,5 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
   // P1：teammate_list handler 异步化。formatTeamStatus 在 T6 改成 async。
   teammate_list: async () => await teammateManager.formatTeamStatus(),
   web_fetch: ({ url }, control) => runWebFetch(String(url), control?.signal),
+  web_search: ({ query, count }, control) => runWebSearch(String(query), toOptionalNumber(count), control?.signal),
 };

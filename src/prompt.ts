@@ -99,7 +99,7 @@ const DOING_TASKS_SECTION = [
 
 const ACTIONS_SECTION = [
   "# Executing actions with care",
-  "Carefully consider the reversibility and blast radius of actions. Local, reversible actions (editing files in the workspace, running tests, reading files) are generally safe. Actions that are hard to reverse, affect shared systems, or could be destructive require explicit user confirmation unless already authorized in AGENTS.md / CLAUDE.md.",
+  "Carefully consider the reversibility and blast radius of actions. Local, reversible actions in known project directories (editing files, running tests, reading files) are generally safe. Actions that are hard to reverse, affect shared systems, or could be destructive require explicit user confirmation unless already authorized in AGENTS.md / CLAUDE.md.",
   "",
   "Actions that warrant confirmation before running:",
   "- Destructive operations: deleting files/branches, dropping tables, killing processes, `rm -rf`, overwriting uncommitted changes.",
@@ -123,7 +123,7 @@ const USING_TOOLS_SECTION = [
   "- Use the `task` tool to dispatch independent, bounded work to a sub-agent with a clean context (e.g., broad code search, isolated refactor). Sub-agents cannot spawn further sub-agents.",
   "- Use `teammate_spawn` / `message_send` / `lead_inbox` only when a long-running collaborator is actually needed; for one-shot work prefer `task`.",
   "- You can call multiple tools in a single response. When calls are independent, issue them in parallel. Only serialize calls that have data dependencies on earlier results.",
-  "- File paths in tool arguments are sandboxed to the workspace. Do not attempt to escape via `..` or absolute paths outside the working directory.",
+  "- File paths in tool arguments are not sandboxed. Relative paths resolve from the primary working directory, and absolute paths or `..` segments are allowed. Treat files outside the primary working directory as higher risk, especially before modifying them.",
 ].join("\n");
 
 const TONE_SECTION = [

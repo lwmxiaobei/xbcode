@@ -2,7 +2,7 @@
 
 # xbcode
 
-`xbcode` 是一个基于 TypeScript、OpenAI SDK 和 Ink 构建的终端代码代理。它运行在命令行中，支持流式输出、工具调用、工作区内读写与执行、持久化任务、技能加载、MCP 集成，以及轻量级多 Agent 协作。
+`xbcode` 是一个基于 TypeScript、OpenAI SDK 和 Ink 构建的终端代码代理。它运行在命令行中，支持流式输出、本地工具调用、持久化任务、技能加载、MCP 集成，以及轻量级多 Agent 协作。
 
 这个项目的目标不是做一个“什么都包”的庞大框架，而是提供一个足够实用、同时又足够小巧、便于阅读和改造的 CLI Agent 实现。
 
@@ -10,7 +10,7 @@
 
 - 基于 Ink + React 的终端交互界面
 - 同时支持 Responses API 和 Chat Completions API
-- 面向当前工作区的文件与命令工具
+- 面向本机路径和当前工作目录的文件与命令工具
 - 持久化任务系统，任务保存在 `.tasks/`
 - 支持全局技能和仓库本地技能
 - 支持 MCP server 接入
@@ -47,7 +47,11 @@ npm run dev
 {
   "providers": {
     "openai": {
-      "models": ["gpt-4.1", "gpt-4.1-mini", "o3-mini"],
+      "models": [
+        { "id": "gpt-4.1", "name": "GPT-4.1" },
+        { "id": "gpt-4.1-mini", "name": "GPT-4.1 Mini" },
+        { "id": "o3-mini", "name": "o3 Mini" }
+      ],
       "apiKey": "YOUR_OPENAI_API_KEY",
       "baseURL": "https://api.openai.com/v1",
       "apiMode": "responses"
@@ -74,10 +78,27 @@ npm run dev
       "models": ["qwen-plus", "qwen-turbo", "qwen-max"],
       "apiKey": "sk-xxx", // 阿里云百炼 API Key: https://dashscope.console.aliyun.com/
       "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    "volcengine": {
+      "models": [
+        { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code" },
+        { "id": "doubao-seed-2.0-pro", "name": "Doubao Seed 2.0 Pro" },
+        { "id": "doubao-seed-2.0-lite", "name": "Doubao Seed 2.0 Lite" },
+        { "id": "doubao-seed-code", "name": "Doubao Seed Code" },
+        { "id": "minimax-m2.7", "name": "MiniMax M2.7" },
+        { "id": "minimax-m3", "name": "MiniMax M3" },
+        { "id": "glm-5.1", "name": "GLM 5.1" },
+        { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+        { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+        { "id": "kimi-k2.6", "name": "Kimi K2.6" }
+      ],
+      "apiKey": "YOUR_ARK_API_KEY",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "apiMode": "chat-completions"
     }
   },
-  "defaultProvider": "openai",
-  "defaultModel": "gpt-4.1",
+  "defaultProvider": "volcengine",
+  "defaultModel": "doubao-seed-2.0-code",
   "showThinking": false,
   "mcp": {
     "servers": []
@@ -113,6 +134,18 @@ npm start
 ```
 
 如果环境变量里没有预先指定 `MODEL_ID`，并且 `~/.xbcode/settings.json` 里也没有可用的 `defaultModel`，CLI 会引导你选择 provider 和 model。
+
+当前安装后生成的默认配置会优先使用火山方舟 Ark，默认模型为 `doubao-seed-2.0-code`。
+
+### 网络搜索
+
+内置 `web_search` 工具使用 Brave Search API。需要在项目根目录 `.env` 或当前 shell 中配置：
+
+```bash
+BRAVE_SEARCH_API_KEY=你的 Brave Search API Key
+```
+
+模型需要查找最新信息时会先调用 `web_search` 获取候选结果，再用 `web_fetch` 读取选中的页面内容。
 
 ## 使用说明
 
@@ -196,7 +229,9 @@ OpenAI OAuth 配置示例：
 }
 ```
 
-如果不显式指定，程序也会根据 `baseURL` 做一部分自动判断，例如 DeepSeek 风格地址会默认切到 `chat-completions`。
+如果不显式指定，程序也会根据 `baseURL` 做一部分自动判断，例如 DeepSeek、阿里云百炼兼容地址，以及火山方舟 Ark 兼容地址，都会默认切到 `chat-completions`。
+
+对于火山方舟 Ark，请在 provider 里填写你的 Ark API Key，`baseURL` 使用 `https://ark.cn-beijing.volces.com/api/coding/v3`，`models` 则填写你可用的模型 ID。当前可直接配置的示例包括：`doubao-seed-2.0-code`、`doubao-seed-2.0-pro`、`doubao-seed-2.0-lite`、`doubao-seed-code`、`minimax-m2.7`、`minimax-m3`、`glm-5.1`、`deepseek-v4-flash`、`deepseek-v4-pro`、`kimi-k2.6`。
 
 如果启用了 OpenAI OAuth：
 
@@ -216,9 +251,10 @@ OAuth 命令：
 
 ### 工作区行为
 
-`xbcode` 总是围绕当前工作目录运行：
+`xbcode` 以当前工作目录作为默认基准，但文件工具不做路径沙箱限制：
 
-- 文件工具只能访问 `process.cwd()` 下的路径
+- 文件工具接受相对路径、`..` 和绝对路径
+- 相对路径基于 `process.cwd()` 解析
 - shell 命令在当前工作目录执行
 - 本地技能从 `<workdir>/skills` 加载
 - 团队状态保存在 `<workdir>/.team`
@@ -510,7 +546,8 @@ npm test
 
 当前实现有一些明确的工程取舍：
 
-- 文件访问限制在当前工作区
+- 文件访问不限制在当前工作区
+- 主 agent 的写入类文件工具仍需要工具审批
 - shell 命令有超时
 - 一部分极危险命令会被直接拦截
 - 工具输出会截断，防止撑爆上下文

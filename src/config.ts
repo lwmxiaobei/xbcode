@@ -259,8 +259,12 @@ function resolveApiMode(baseURL: string, explicit?: string): "responses" | "chat
     return "responses";
   }
   const lowerBaseURL = baseURL.toLowerCase();
-  // Auto-detect providers that only support Chat Completions API
-  if (lowerBaseURL.includes("deepseek.com") || lowerBaseURL.includes("dashscope.aliyuncs.com")) {
+  // Auto-detect providers that only support Chat Completions-compatible APIs.
+  if (
+    lowerBaseURL.includes("deepseek.com")
+    || lowerBaseURL.includes("dashscope.aliyuncs.com")
+    || lowerBaseURL.includes("ark.cn-beijing.volces.com")
+  ) {
     return "chat-completions";
   }
   return "responses";
