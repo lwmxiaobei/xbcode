@@ -50,6 +50,7 @@
     "dotenv": "^16.6.1",
     "ink": "^6.8.0",
     "ink-text-input": "^6.0.0",
+    "js-tiktoken": "^1.0.21",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "openai": "^5.19.1",

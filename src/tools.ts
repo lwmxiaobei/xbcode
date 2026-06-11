@@ -4,6 +4,7 @@ import os from "node:os";
 import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { truncateMiddleWithTokenBudget } from "./truncate.js";
 import { MessageBus } from "./message-bus.js";
 import { TeammateManager } from "./teammate-manager.js";
 import { TaskManager } from "./task-manager.js";
@@ -140,20 +141,14 @@ export function detectDangerousCommand(command: string): string | null {
   return null;
 }
 
-// 工具输出统一截断阈值。50K 字符大约对应 12K~15K tokens，足够覆盖一次合理工具调用，
-// 又不至于把上下文塞满。所有截断都走 `appendTruncationNotice`，保证模型能看到一致的提示。
-const TOOL_OUTPUT_MAX_BYTES = 50_000;
+// 工具输出统一截断阈值。12K tokens 对应 codex 的默认值，在 GPT-4 级模型上
+// 大约覆盖 12K~18K 词，足够保留完整工具输出又不会撑爆上下文。
+// 截断策略采用 codex 的"中间截断"：head + …N tokens truncated… + tail，
+// 模型能看到开头和结尾的关键信息，知道中间被省略了。
+const TOOL_OUTPUT_MAX_TOKENS = 12_000;
 
-// 模型不读字节数，所以截断提示用「行数」而不是「字节数」更直观。
-// 格式参考 Claude Code 的 BashTool/utils.ts：在 kept 后追加 `\n\n... [N lines truncated] ...`，
-// 模型流式从前往后读，看到末尾的提示行就知道内容被截断、可以选择再读 / 缩小范围。
-export function appendTruncationNotice(content: string, maxBytes: number = TOOL_OUTPUT_MAX_BYTES): string {
-  if (content.length <= maxBytes) return content;
-  const kept = content.slice(0, maxBytes);
-  // dropped 部分里的换行数 + 1 = 被截掉的行数（最后一行可能不完整也算一行）。
-  const dropped = content.slice(maxBytes);
-  const remainingLines = (dropped.match(/\n/g)?.length ?? 0) + 1;
-  return `${kept}\n\n... [${remainingLines} lines truncated] ...`;
+function truncateToolOutput(content: string, maxTokens: number = TOOL_OUTPUT_MAX_TOKENS): string {
+  return truncateMiddleWithTokenBudget(content, maxTokens).text;
 }
 
 async function runBash(command: string, signal?: AbortSignal): Promise<string> {
@@ -171,7 +166,7 @@ async function runBash(command: string, signal?: AbortSignal): Promise<string> {
       signal,
     });
     const combined = `${stdout}${stderr}`.trim();
-    return combined ? appendTruncationNotice(combined) : "(no output)";
+    return combined ? truncateToolOutput(combined) : "(no output)";
   } catch (error) {
     if ((error as { name?: string } | null | undefined)?.name === "AbortError" || signal?.aborted) {
       return "Error: Command aborted";
@@ -183,7 +178,7 @@ async function runBash(command: string, signal?: AbortSignal): Promise<string> {
 
     const execError = toExecError(error);
     const combined = `${execError.stdout ?? ""}${execError.stderr ?? ""}`.trim();
-    return combined ? appendTruncationNotice(combined) : `Error: ${String(error)}`;
+    return combined ? truncateToolOutput(combined) : `Error: ${String(error)}`;
   }
 }
 
@@ -195,7 +190,7 @@ function runRead(filePath: string, limit?: number): string {
     if (limit && limit < lines.length) {
       lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
     }
-    return appendTruncationNotice(lines.join("\n"));
+    return truncateToolOutput(lines.join("\n"));
   } catch (error) {
     return `Error: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -349,7 +344,6 @@ export function stripHtml(html: string): string {
 
 const WEB_FETCH_TIMEOUT_MS = 30_000;
 const WEB_FETCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
-const WEB_FETCH_MAX_OUTPUT_CHARS = 100_000;
 const WEB_SEARCH_TIMEOUT_MS = 30_000;
 const WEB_SEARCH_MAX_RESULTS = 10;
 const WEB_SEARCH_DEFAULT_RESULTS = 5;
@@ -440,7 +434,7 @@ async function runWebSearch(query: string, countRaw?: number, signal?: AbortSign
     `Results: ${Math.min(results.length, count)}`,
     "Provider: Brave Search",
   ].join("\n");
-  return appendTruncationNotice(`${header}\n---\n${formatted}`);
+  return truncateToolOutput(`${header}\n---\n${formatted}`);
 }
 
 async function runWebFetch(rawUrl: string, signal?: AbortSignal): Promise<string> {
@@ -498,7 +492,7 @@ async function runWebFetch(rawUrl: string, signal?: AbortSignal): Promise<string
   const looksLikeHtml = contentType.includes("text/html") || /^\s*<!doctype html|^\s*<html[\s>]/i.test(bodyText);
   const content = looksLikeHtml ? stripHtml(bodyText) : bodyText;
 
-  const body = appendTruncationNotice(content, WEB_FETCH_MAX_OUTPUT_CHARS);
+  const body = truncateToolOutput(content, /* use larger budget for web fetch */ 25_000);
   const header = [
     `URL: ${response.url || url.toString()}`,
     `Status: ${response.status}`,
