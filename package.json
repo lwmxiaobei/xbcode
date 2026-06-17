@@ -1,6 +1,6 @@
 {
   "name": "@lwmxiaobei/xbcode",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": false,
   "description": "Xbcode CLI agent",
   "type": "module",
@@ -23,7 +23,7 @@
     "mcp"
   ],
   "bin": {
-    "xbcode": "./dist/index.js"
+    "xbcode": "dist/index.js"
   },
   "publishConfig": {
     "access": "public"

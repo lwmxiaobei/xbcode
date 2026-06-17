@@ -322,6 +322,11 @@ export type UiBridge = {
 
 - `/help`
 - `/status`
+- `/goal [objective]`
+- `/goal pause`
+- `/goal resume`
+- `/goal budget <tokens>`
+- `/goal clear`
 - `/mcp`
 - `/mcp refresh [name]`
 - `/team`

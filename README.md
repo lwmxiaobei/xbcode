@@ -162,6 +162,11 @@ Built-in slash commands currently include:
 
 - `/help`
 - `/status`
+- `/goal [objective]`
+- `/goal pause`
+- `/goal resume`
+- `/goal budget <tokens>`
+- `/goal clear`
 - `/login`
 - `/logout`
 - `/mcp`
@@ -175,6 +180,8 @@ Built-in slash commands currently include:
 - `/exit`
 
 Skill prompt-commands are also exposed as slash commands when available from loaded skills.
+
+`/goal <objective>` creates a session-persistent goal and keeps starting continuation turns until the model marks it complete or blocked, the user pauses it, an error pauses it, or its token budget is exhausted. Goal state and usage are saved with the session and restored by `/resume`.
 
 ### Provider and model configuration
 
@@ -209,6 +216,7 @@ Providers are configured in `~/.xbcode/settings.json`:
         { "id": "minimax-m2.7", "name": "MiniMax M2.7" },
         { "id": "minimax-m3", "name": "MiniMax M3" },
         { "id": "glm-5.1", "name": "GLM 5.1" },
+        { "id": "glm-5.2", "name": "GLM 5.2" },
         { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
         { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
         { "id": "kimi-k2.6", "name": "Kimi K2.6" }

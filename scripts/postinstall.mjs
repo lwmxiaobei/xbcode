@@ -28,6 +28,7 @@ const defaultSettings = {
         { id: "minimax-m2.7", name: "MiniMax M2.7" },
         { id: "minimax-m3", name: "MiniMax M3" },
         { id: "glm-5.1", name: "GLM 5.1" },
+        { id: "glm-5.2", name: "GLM 5.2" },
         { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
         { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
         { id: "kimi-k2.6", name: "Kimi K2.6" },

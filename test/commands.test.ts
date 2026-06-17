@@ -6,6 +6,7 @@ import { normalizeCommand, parseStartupCommand, submissionNeedsSelectedModel } f
 test("normalizeCommand keeps built-in commands that carry trailing arguments", () => {
   assert.equal(normalizeCommand("/provider openai"), "provider openai");
   assert.equal(normalizeCommand("/model gpt-5"), "model gpt-5");
+  assert.equal(normalizeCommand("/MODEL GPT-5"), "model gpt-5");
   assert.equal(normalizeCommand("/login openai"), "login openai");
   assert.equal(normalizeCommand("/logout openai"), "logout openai");
   assert.equal(normalizeCommand("/resume 20260422-abcd12"), "resume 20260422-abcd12");
@@ -20,6 +21,11 @@ test("normalizeCommand recognizes /usage as a built-in command", () => {
   assert.equal(normalizeCommand("/USAGE"), "usage");
   // 没有 "/" 前缀的纯文本不应该被吞成命令，避免误吞普通对话
   assert.equal(normalizeCommand("usage"), null);
+});
+
+test("normalizeCommand preserves goal objective casing and spacing", () => {
+  assert.equal(normalizeCommand("/goal Build OAuth API"), "goal Build OAuth API");
+  assert.equal(normalizeCommand("/GOAL   Build OAuth API"), "goal Build OAuth API");
 });
 
 test("normalizeCommand returns null for unknown slash commands", () => {

@@ -14,6 +14,7 @@ import { logApiError, wrapApiError } from "./error-log.js";
 import { getDynamicMcpToolSurface } from "./mcp/runtime.js";
 import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, BASE_CHAT_TOOLS, TEAMMATE_TOOLS, TEAMMATE_CHAT_TOOLS, BASE_TOOL_HANDLERS, taskManager } from "./tools.js";
 import { formatTeammateMessages } from "./message-bus.js";
+import { createGoal, getGoal, updateGoalFromModel } from "./goal-manager.js";
 import { getSubagentDefinition, type SubagentDefinition } from "./subagents.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";
 import type { ToolArgs, ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ToolApprovalDecision, UserChoiceQuestion, UserChoiceOption } from "./types.js";
@@ -1314,10 +1315,17 @@ async function launchTeammateRuntime(config: AgentConfig, control: TeammateRunti
   }
 }
 
-function buildLeadHandlers(config: AgentConfig, bridge: UiBridge): ToolHandlerMap {
+function buildLeadHandlers(config: AgentConfig, bridge: UiBridge, state: AgentState): ToolHandlerMap {
   return {
     ...BASE_TOOL_HANDLERS,
     ...buildSharedTeamHandlers(LEAD_NAME),
+    get_goal: () => getGoal(state),
+    create_goal: ({ objective, token_budget }) => createGoal(
+      state,
+      String(objective ?? ""),
+      typeof token_budget === "number" ? token_budget : undefined,
+    ),
+    update_goal: ({ status }) => updateGoalFromModel(state, status),
     task: async ({ description, subagent_type }) => {
       const taskDescription = String(description ?? "");
       const definition = getSubagentDefinition(typeof subagent_type === "string" ? subagent_type : undefined);
@@ -1758,8 +1766,9 @@ async function runTurn(
   chatTools: readonly any[],
   control?: RunControl,
   caller: string = "main",
-): Promise<void> {
+): Promise<TurnResult> {
   throwIfAborted(control?.signal);
+  const startedAt = Date.now();
   const { apiMode } = config;
   state.turnCount += 1;
   state.roundsSinceTask = 0;
@@ -1810,7 +1819,7 @@ async function runTurn(
       }
       throw error;
     }
-    return;
+    return { usage: turnUsage, elapsedMs: Date.now() - startedAt };
   }
 
   if (state.turnCount > 1 && (state.turnCount - 1) % RESPONSES_COMPACT_INTERVAL === 0) {
@@ -1873,6 +1882,7 @@ async function runTurn(
     }
     throw error;
   }
+  return { usage: turnUsage, elapsedMs: Date.now() - startedAt };
 }
 
 export type AgentConfig = {
@@ -1884,6 +1894,11 @@ export type AgentConfig = {
   supportsPreviousResponseId: boolean;
 };
 
+export type TurnResult = {
+  usage: TokenUsage;
+  elapsedMs: number;
+};
+
 export async function runAgentTurn(
   config: AgentConfig,
   query: string,
@@ -1891,7 +1906,7 @@ export async function runAgentTurn(
   state: AgentState,
   bridge: UiBridge,
   control?: RunControl,
-): Promise<void> {
-  const runtime = await prepareToolRuntime(buildLeadHandlers(config, bridge), TOOLS, CHAT_TOOLS);
-  await runTurn(config, query, attachments, state, bridge, runtime.handlers, runtime.responseTools, runtime.chatTools, control);
+): Promise<TurnResult> {
+  const runtime = await prepareToolRuntime(buildLeadHandlers(config, bridge, state), TOOLS, CHAT_TOOLS);
+  return await runTurn(config, query, attachments, state, bridge, runtime.handlers, runtime.responseTools, runtime.chatTools, control);
 }

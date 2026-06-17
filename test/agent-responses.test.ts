@@ -7,6 +7,7 @@ import {
   runAgentTurn,
   shouldPreserveChatReasoningContent,
 } from "../src/agent.js";
+import { mcpManager } from "../src/mcp/runtime.js";
 import type { AgentState, UiBridge } from "../src/types.js";
 
 test("extractAssistantTextFromResponseOutput recovers assistant text from message output items", () => {
@@ -52,6 +53,9 @@ test("shouldPreserveChatReasoningContent keeps thinking payloads only for models
 });
 
 test("responses stream failure preserves interrupted turn for the next continue request", async () => {
+  await mcpManager.configure([]);
+  await mcpManager.initializeAll();
+
   const assistantDeltas: string[] = [];
   const client = {
     responses: {

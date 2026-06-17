@@ -1042,6 +1042,48 @@ ${describeSubagentsForHumans()}`,
   },
 } as const;
 
+export const GOAL_TOOLS = [
+  {
+    type: "function",
+    name: "get_goal",
+    description: "Get the current goal for this session, including status, token usage, elapsed time, and remaining token budget.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "create_goal",
+    description:
+      "Create a goal only when explicitly requested by the user. Do not infer goals from ordinary tasks. Fails while an unfinished goal exists.",
+    parameters: {
+      type: "object",
+      properties: {
+        objective: { type: "string", description: "The concrete objective to keep pursuing across turns." },
+        token_budget: { type: "integer", description: "Optional positive token budget. Set only when explicitly requested." },
+      },
+      required: ["objective"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "update_goal",
+    description:
+      "Mark the current goal complete or genuinely blocked. Use complete only after the full objective is achieved and verified. Use blocked only after the same blocker repeats for at least three consecutive goal turns and meaningful progress is impossible without user input or an external state change. Pause, resume, budget, and clear actions are controlled by the user.",
+    parameters: {
+      type: "object",
+      properties: {
+        status: { type: "string", enum: ["complete", "blocked"] },
+      },
+      required: ["status"],
+      additionalProperties: false,
+    },
+  },
+] as const;
+
 // 团队协作消息工具。P1 阶段只保留最小字段：to + content。
 // 协议消息（shutdown / approval）将在 P3 用独立工具实现，不再混在 message_send 里。
 export const TEAM_MESSAGE_TOOL = {
@@ -1146,6 +1188,7 @@ export const ASK_USER_QUESTION_TOOL = {
 // P1 删除 LEAD_INBOX_TOOL：lead 邮箱由 runOneTurn 自动注入，不再需要 lead 主动「查邮箱」。
 export const TOOLS = [
   ...BASE_TOOLS,
+  ...GOAL_TOOLS,
   ASK_USER_QUESTION_TOOL,
   TASK_TOOL,
   TEAM_MESSAGE_TOOL,

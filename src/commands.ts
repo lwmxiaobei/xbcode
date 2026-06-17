@@ -11,7 +11,7 @@
  *   possible without importing the full TUI entrypoint.
  */
 export function normalizeCommand(inputValue: string): string | null {
-  const trimmed = inputValue.trim().toLowerCase();
+  const trimmed = inputValue.trim();
   if (!trimmed) {
     return null;
   }
@@ -34,7 +34,10 @@ export function normalizeCommand(inputValue: string): string | null {
 
   const withoutSlash = trimmed.slice(1);
   const parts = withoutSlash.split(/\s+/);
-  const cmd = parts[0];
+  const cmd = parts[0]?.toLowerCase();
+  const args = withoutSlash.slice(parts[0]?.length ?? 0).trim();
+  const normalizedArgs = cmd === "goal" ? args : args.toLowerCase();
+  const normalized = normalizedArgs ? `${cmd} ${normalizedArgs}` : cmd;
 
   switch (cmd) {
     case "help":
@@ -46,13 +49,14 @@ export function normalizeCommand(inputValue: string): string | null {
     case "compact":
     case "new":
     case "resume":
+    case "goal":
     case "exit":
-      return withoutSlash;
+      return normalized;
     case "provider":
     case "model":
     case "login":
     case "logout":
-      return withoutSlash;
+      return normalized;
     case "quit":
       return "exit";
     default:

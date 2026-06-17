@@ -46,6 +46,18 @@ import { createSharedFetch } from "./http.js";
 import { normalizeCommand, parseStartupCommand, submissionNeedsSelectedModel } from "./commands.js";
 import { createSubmitDeduper, getSubmittedValueFromInput } from "./input-submit.js";
 import { formatTeammateMessages } from "./message-bus.js";
+import {
+  accountGoalTurn,
+  buildGoalContinuationPrompt,
+  clearGoal,
+  createGoal,
+  formatGoal,
+  goalCanResume,
+  isGoalActive,
+  pauseActiveGoal,
+  setGoalBudget,
+  setGoalStatus,
+} from "./goal-manager.js";
 import { ensureMcpInitialized, getMcpPromptInstructions, mcpManager, primeMcpRuntime, refreshMcpFromSettings } from "./mcp/runtime.js";
 import {
   OPENAI_CODEX_BASE_URL,
@@ -226,6 +238,7 @@ const MAX_VISIBLE_SLASH_MATCHES = 8;
 const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/help", description: "show available commands" },
   { command: "/status", description: "show session status" },
+  { command: "/goal", description: "show or manage the persistent session goal" },
   { command: "/usage", description: "show codex subscription usage (5h / weekly limits)" },
   { command: "/login", description: "start oauth login for the current provider" },
   { command: "/logout", description: "clear oauth credentials for the current provider" },
@@ -805,6 +818,10 @@ function helpMessage(): string {
   return [
     "help                show available commands",
     "status              show session status",
+    "goal [objective]    show or create a persistent session goal",
+    "goal pause|resume   pause or resume automatic goal continuation",
+    "goal budget <n>     set the active goal token budget",
+    "goal clear          clear the current goal",
     "usage               show codex subscription usage (5h / weekly limits)",
     "mcp [refresh [name]] show MCP status or refresh all / one server",
     "team                show teammate statuses",
@@ -848,6 +865,7 @@ async function sessionStatus(state: AgentState, tokenUsage?: TokenUsage): Promis
     formatAuthSummary(currentAuthState),
     `session  ${state.sessionId}`,
     `turns    ${state.turnCount}`,
+    state.goal ? `goal     ${state.goal.status} | ${state.goal.tokensUsed} tokens | ${state.goal.objective}` : "",
     `context  ~${estimateActiveContextTokens(state)} tokens | compacted: ${state.compactCount} times`,
     tokenUsage && tokenUsage.inputTokens + tokenUsage.outputTokens > 0
       ? `tokens   ${formatNum(tokenUsage.inputTokens)} in → ${formatNum(tokenUsage.outputTokens)} out  ${tokenUsage.cost.toFixed(4)}`
@@ -1615,6 +1633,9 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     }
 
     stopRequestedRef.current = true;
+    if (pauseActiveGoal(agentStateRef.current)) {
+      pushMessage("system", "Paused active goal.", "goal");
+    }
     controller.abort();
     pushMessage("system", "Stopping current turn. Session context will be kept.", "stop");
   };
@@ -1726,7 +1747,9 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
     if (!effectiveQuery) return; // 双空：无事可做
 
-    await runAgentTurn(
+    const goalBeforeTurn = agentStateRef.current.goal;
+    const activeGoalIdBeforeTurn = goalBeforeTurn?.status === "active" ? goalBeforeTurn.id : undefined;
+    const result = await runAgentTurn(
       agentConfig,
       effectiveQuery,
       attachments,
@@ -1734,13 +1757,41 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       bridge,
       { signal },
     );
+    const goalAfterTurn = agentStateRef.current.goal;
+    const createdGoalId = goalAfterTurn?.id !== goalBeforeTurn?.id ? goalAfterTurn?.id : undefined;
+    accountGoalTurn(
+      agentStateRef.current,
+      activeGoalIdBeforeTurn ?? createdGoalId,
+      result.usage,
+      result.elapsedMs,
+    );
+    persistCurrentSession();
+  };
+
+  const runAutomaticContinuations = async (signal: AbortSignal): Promise<void> => {
+    while (!signal.aborted) {
+      if ((await messageBus.unreadCount("lead")) > 0) {
+        pushMessage("system", "(continuing turn for teammate message(s))", "inbox");
+        await runOneTurn("", [], signal);
+        continue;
+      }
+
+      const goal = agentStateRef.current.goal;
+      if (goal?.status === "active") {
+        await runOneTurn(buildGoalContinuationPrompt(goal), [], signal);
+        continue;
+      }
+      return;
+    }
   };
 
   // P1 lead idle 唤醒：listener 触发，但当前轮在跑就什么都不做（路径 A 的 while 兜底）。
   // 只有 lead 当前空闲才主动开一轮。
   const triggerLeadAutoTurn = async (): Promise<void> => {
     if (busyRef.current) return;
-    if ((await messageBus.unreadCount("lead")) === 0) return;
+    if (!currentResolved) return;
+    const hasUnread = (await messageBus.unreadCount("lead")) > 0;
+    if (!hasUnread && !isGoalActive(agentStateRef.current)) return;
 
     setBusy(true); busyRef.current = true;
     stopRequestedRef.current = false;
@@ -1750,19 +1801,18 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     try {
       await ensureMcpInitialized();
       await refreshCurrentAuth();
-      await runOneTurn("", [], abortController.signal);
-      while (
-        !abortController.signal.aborted
-        && (await messageBus.unreadCount("lead")) > 0
-      ) {
-        pushMessage("system", "(continuing turn for teammate message(s))", "inbox");
+      if (hasUnread) {
         await runOneTurn("", [], abortController.signal);
       }
+      await runAutomaticContinuations(abortController.signal);
     } catch (error) {
       finalizeStreaming();
       if (isTurnInterruptedError(error)) {
         pushMessage("system", "Stopped current turn. Session context preserved.", "stop");
       } else {
+        if (pauseActiveGoal(agentStateRef.current)) {
+          pushMessage("system", "Paused active goal after turn error.", "goal");
+        }
         pushMessage("error", error instanceof Error ? error.message : String(error), "error");
       }
     } finally {
@@ -1784,6 +1834,13 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     return unregister;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (trusted === true && modelSelected && userHasChosenModel) {
+      void triggerLeadAutoTurn();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trusted, modelSelected, userHasChosenModel]);
 
   const submitQuery = async (query: string, attachments: ImageAttachment[] = []) => {
     const trimmed = query.trim();
@@ -1815,6 +1872,88 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         await ensureMcpInitialized();
         await refreshCurrentAuth();
         pushMessage("system", await sessionStatus(agentStateRef.current, totalTokenUsage), "status");
+        return;
+      }
+
+      if (command.startsWith("goal")) {
+        const goalArg = command.slice(4).trim();
+        const state = agentStateRef.current;
+
+        if (!goalArg) {
+          pushMessage("system", formatGoal(state.goal), "goal");
+          return;
+        }
+        if (goalArg === "pause") {
+          pushMessage("system", setGoalStatus(state, "paused"), "goal");
+          persistCurrentSession();
+          return;
+        }
+        if (goalArg === "clear") {
+          pushMessage("system", clearGoal(state), "goal");
+          persistCurrentSession();
+          return;
+        }
+        if (goalArg.startsWith("budget ")) {
+          const budget = Number(goalArg.slice("budget ".length).trim());
+          pushMessage("system", setGoalBudget(state, budget), "goal");
+          persistCurrentSession();
+          return;
+        }
+
+        let shouldStart = false;
+        if (goalArg === "resume") {
+          if (!hasSelectedModel) {
+            pushMessage("error", "No model selected. Use /model to select one.", "model");
+            return;
+          }
+          if (!goalCanResume(state.goal)) {
+            pushMessage("error", "No paused or blocked goal can be resumed. Raise an exhausted budget before resuming.", "goal");
+            return;
+          }
+          pushMessage("system", setGoalStatus(state, "active"), "goal");
+          shouldStart = true;
+        } else {
+          if (!hasSelectedModel) {
+            pushMessage("error", "No model selected. Use /model to select one.", "model");
+            return;
+          }
+          const result = createGoal(state, goalArg);
+          if (result.startsWith("Error:")) {
+            pushMessage("error", result, "goal");
+            return;
+          }
+          pushMessage("system", result, "goal");
+          shouldStart = true;
+        }
+        persistCurrentSession();
+
+        if (shouldStart && isGoalActive(state)) {
+          setBusy(true); busyRef.current = true;
+          stopRequestedRef.current = false;
+          const abortController = new AbortController();
+          activeTurnAbortRef.current = abortController;
+          try {
+            await ensureMcpInitialized();
+            await refreshCurrentAuth();
+            await runAutomaticContinuations(abortController.signal);
+          } catch (error) {
+            finalizeStreaming();
+            if (isTurnInterruptedError(error)) {
+              pushMessage("system", "Stopped current turn. Session context preserved.", "stop");
+            } else {
+              if (pauseActiveGoal(state)) {
+                pushMessage("system", "Paused active goal after turn error.", "goal");
+              }
+              pushMessage("error", error instanceof Error ? error.message : String(error), "error");
+            }
+          } finally {
+            finalizeStreaming();
+            persistCurrentSession();
+            activeTurnAbortRef.current = null;
+            stopRequestedRef.current = false;
+            setBusy(false); busyRef.current = false;
+          }
+        }
         return;
       }
 
@@ -1995,6 +2134,9 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
         resetConversation(snapshot);
         pushMessage("system", `Resumed session ${snapshot.state.sessionId}.`, "resume");
+        if (snapshot.state.goal?.status === "active") {
+          await triggerLeadAutoTurn();
+        }
         return;
       }
 
@@ -2192,14 +2334,12 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         try {
           await ensureMcpInitialized();
           await refreshCurrentAuth();
-          await runAgentTurn(
-            agentConfig,
+          await runOneTurn(
             skillLoader.renderSkill(skillSlashInvocation.command, skillSlashInvocation.args),
             [],
-            agentStateRef.current,
-            bridge,
-            { signal: abortController.signal },
+            abortController.signal,
           );
+          await runAutomaticContinuations(abortController.signal);
         } catch (error) {
           finalizeStreaming();
           if (isTurnInterruptedError(error)) {
@@ -2208,6 +2348,9 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
               : "Stopped current turn. Session context preserved.";
             pushMessage("system", stopMessage, "stop");
           } else {
+            if (pauseActiveGoal(agentStateRef.current)) {
+              pushMessage("system", "Paused active goal after turn error.", "goal");
+            }
             pushMessage("error", error instanceof Error ? error.message : String(error), "error");
           }
         } finally {
@@ -2236,17 +2379,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
       // P1：用户主动提交时合并未读邮件 + 用户 query 一起注入。
       await runOneTurn(trimmed, attachments, abortController.signal);
-
-      // 严格 CC 自动续轮：邮箱有未读就持续开新轮，直到清空或被 abort。
-      // 为什么不加熔断：北哥要求严格对齐 CC，CC 自身也无熔断。
-      // 安全网仍在：用户随时可 Ctrl+C / Esc 触发 abortController。
-      while (
-        !abortController.signal.aborted
-        && (await messageBus.unreadCount("lead")) > 0
-      ) {
-        pushMessage("system", "(continuing turn for teammate message(s))", "inbox");
-        await runOneTurn("", [], abortController.signal);
-      }
+      await runAutomaticContinuations(abortController.signal);
     } catch (error) {
       finalizeStreaming();
       if (isTurnInterruptedError(error)) {
@@ -2255,6 +2388,9 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
           : "Stopped current turn. Session context preserved.";
         pushMessage("system", stopMessage, "stop");
       } else {
+        if (pauseActiveGoal(agentStateRef.current)) {
+          pushMessage("system", "Paused active goal after turn error.", "goal");
+        }
         pushMessage("error", error instanceof Error ? error.message : String(error), "error");
       }
     } finally {

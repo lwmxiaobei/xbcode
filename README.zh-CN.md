@@ -88,6 +88,7 @@ npm run dev
         { "id": "minimax-m2.7", "name": "MiniMax M2.7" },
         { "id": "minimax-m3", "name": "MiniMax M3" },
         { "id": "glm-5.1", "name": "GLM 5.1" },
+        { "id": "glm-5.2", "name": "GLM 5.2" },
         { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
         { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
         { "id": "kimi-k2.6", "name": "Kimi K2.6" }
@@ -172,6 +173,11 @@ xbcode
 
 - `/help`
 - `/status`
+- `/goal [objective]`
+- `/goal pause`
+- `/goal resume`
+- `/goal budget <tokens>`
+- `/goal clear`
 - `/login`
 - `/logout`
 - `/mcp`
@@ -185,6 +191,8 @@ xbcode
 - `/exit`
 
 如果 skill 提供了 prompt command，也会以 slash command 的形式暴露出来。
+
+`/goal <objective>` 会创建一个随 session 持久化的目标。目标保持 `active` 时，宿主会自动开启续轮，直到模型标记完成或阻塞、用户暂停、运行错误触发暂停，或者 token 预算耗尽。`/resume` 恢复会话时也会恢复 goal 状态和用量。
 
 ### Provider 和模型配置
 

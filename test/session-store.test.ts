@@ -30,9 +30,20 @@ test("session store saves and restores the latest checkpoint for a workspace", (
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "xbcode-session-"));
   process.env.XBCODE_SESSION_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "xbcode-session-root-"));
   const sessionId = createSessionId(new Date("2026-04-22T10:00:00.000Z"));
+  const stateWithGoal = buildState(sessionId, Date.parse("2026-04-22T10:00:00.000Z"));
+  stateWithGoal.goal = {
+    id: "goal-1",
+    objective: "完成恢复测试",
+    status: "active",
+    tokenBudget: 5000,
+    tokensUsed: 120,
+    timeUsedSeconds: 8,
+    createdAt: Date.parse("2026-04-22T10:00:00.000Z"),
+    updatedAt: Date.parse("2026-04-22T10:01:00.000Z"),
+  };
 
   appendSessionCheckpoint(workspace, {
-    state: buildState(sessionId, Date.parse("2026-04-22T10:00:00.000Z")),
+    state: stateWithGoal,
     messages: buildMessages("先研究 claude code 的 session 存储"),
     providerName: "openai",
     model: "gpt-5.4",
@@ -42,7 +53,7 @@ test("session store saves and restores the latest checkpoint for a workspace", (
 
   appendSessionCheckpoint(workspace, {
     state: {
-      ...buildState(sessionId, Date.parse("2026-04-22T10:00:00.000Z")),
+      ...stateWithGoal,
       turnCount: 3,
     },
     messages: buildMessages("先研究 claude code 的 session 存储"),
@@ -56,6 +67,8 @@ test("session store saves and restores the latest checkpoint for a workspace", (
   assert.ok(restored);
   assert.equal(restored.state.sessionId, sessionId);
   assert.equal(restored.state.turnCount, 3);
+  assert.equal(restored.state.goal?.objective, "完成恢复测试");
+  assert.equal(restored.state.goal?.tokensUsed, 120);
   assert.equal(restored.messages[0]?.text, "先研究 claude code 的 session 存储");
 });
 

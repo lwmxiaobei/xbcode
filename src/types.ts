@@ -8,6 +8,19 @@ export type ImageAttachment = {
   base64Data: string;
 };
 
+export type GoalStatus = "active" | "paused" | "blocked" | "budget_limited" | "complete";
+
+export type GoalState = {
+  id: string;
+  objective: string;
+  status: GoalStatus;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type AgentState = {
   sessionId: string;
   previousResponseId?: string;
@@ -18,6 +31,7 @@ export type AgentState = {
   launchedAt: number;
   roundsSinceTask: number;
   compactCount: number;
+  goal?: GoalState;
 };
 
 export type DiffLine = {
