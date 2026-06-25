@@ -39,10 +39,10 @@ import {
   updateProviderModels,
   type ProviderAuthState,
   type ResolvedConfig,
-  type StoredOAuthCredentials,
 } from "./config.js";
 import { estimateTokens, autoCompact, autoCompactResponseHistory } from "./compact.js";
-import { createSharedFetch } from "./http.js";
+import { getContextWindow } from "./agent/model-pricing.js";
+import { buildAgentClient } from "./agent-client.js";
 import { normalizeCommand, parseStartupCommand, submissionNeedsSelectedModel } from "./commands.js";
 import { createSubmitDeduper, getSubmittedValueFromInput } from "./input-submit.js";
 import { formatTeammateMessages } from "./message-bus.js";
@@ -61,8 +61,6 @@ import {
 import { ensureMcpInitialized, getMcpPromptInstructions, mcpManager, primeMcpRuntime, refreshMcpFromSettings } from "./mcp/runtime.js";
 import {
   OPENAI_CODEX_BASE_URL,
-  createOpenAIOAuthFetch,
-  getOpenAIOAuthDefaultHeaders,
   listAvailableModels,
   refreshAccessToken,
   startOpenAILogin,
@@ -83,32 +81,14 @@ loadDotenv({ path: path.join(PROJECT_ROOT, ".env"), override: true });
 const WORKDIR = process.cwd();
 
 function createAgentConfig(resolved: ResolvedConfig, authState?: ProviderAuthState): AgentConfig {
-  const bearerToken = authState?.bearerToken || resolved.apiKey || undefined;
-  const isOpenAIOAuth = resolved.providerName === "openai" && authState?.authMode === "oauth" && authState.oauth;
-  /**
-   * OpenAI OAuth tokens issued by the Codex login flow do not carry the public
-   * API scopes required by `api.openai.com/v1/responses`. They are instead meant
-   * for ChatGPT's internal Codex backend, so OAuth sessions must use that base
-   * URL and header set while API-key sessions keep using the public OpenAI API.
-   */
-  const clientOptions = isOpenAIOAuth
-    ? {
-        apiKey: bearerToken,
-        baseURL: OPENAI_CODEX_BASE_URL,
-        defaultHeaders: getOpenAIOAuthDefaultHeaders(authState.oauth as StoredOAuthCredentials),
-        fetch: createOpenAIOAuthFetch(),
-      }
-    : {
-        apiKey: bearerToken,
-        baseURL: resolved.baseURL !== "https://api.openai.com/v1" ? resolved.baseURL : undefined,
-        // 共享 dispatcher 把闲置 keep-alive 连接保留时间压到 1s，避免在多轮工具
-        // 执行的间隔后下一轮 stream 拿到一条已被远端关闭的连接、立刻报 `terminated`。
-        fetch: createSharedFetch(),
-      };
-  const client = new OpenAI(clientOptions);
+  const { client, supportsPreviousResponseId } = buildAgentClient(resolved, authState);
   return {
     client,
     model: resolved.model,
+    // The headless sub-agent child re-resolves auth from persisted config given
+    // these, so they must travel with the config the `subagent` tool spawns from.
+    providerName: resolved.providerName,
+    modelName: resolved.model,
     system: buildSystemPrompt({
       workdir: WORKDIR,
       skillDescriptions: skillLoader.getDescriptions(),
@@ -116,10 +96,7 @@ function createAgentConfig(resolved: ResolvedConfig, authState?: ProviderAuthSta
     }),
     showThinking: resolved.showThinking,
     apiMode: resolved.apiMode,
-    // ChatGPT Codex backend rejects `previous_response_id`, so only this
-    // OAuth-backed branch needs stateless replay. All other providers keep the
-    // original server-side Responses chaining behavior.
-    supportsPreviousResponseId: !isOpenAIOAuth,
+    supportsPreviousResponseId,
   };
 }
 
@@ -226,6 +203,20 @@ type StartupResumeState = {
  * - The estimate remains intentionally rough; it only needs to show whether
  *   context is growing, not provide billing-grade numbers.
  */
+function zeroUsage(): TokenUsage {
+  return { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cost: 0 };
+}
+
+// `/status` 的上下文行：估算占用 + 占模型窗口百分比 + 压缩次数。
+function contextStatusLine(state: AgentState): string {
+  const contextTokens = estimateActiveContextTokens(state);
+  const contextWindow = getContextWindow(currentResolved?.model ?? "");
+  const pct = contextWindow > 0
+    ? ` | ${((contextTokens / contextWindow) * 100).toFixed(1)}% of ${formatNum(contextWindow)}`
+    : "";
+  return `context  ~${contextTokens} tokens${pct} | compacted: ${state.compactCount} times`;
+}
+
 function estimateActiveContextTokens(state: AgentState): number {
   if (currentResolved?.apiMode === "responses") {
     return estimateTokens(state.responseHistory as any);
@@ -793,17 +784,33 @@ function StatusBar({ width, busy, state, tokenUsage }: { width: number; busy: bo
     ? `[${currentResolved.providerName}] ${currentResolved.model}`
     : "[no-model]";
   const mid = `${state.turnCount} turns`;
+
+  // 累计用量段：整段会话的 ↑输入 ↓输出 与累计费用。还没有任何 API 调用时省略。
   const totalTokens = tokenUsage.inputTokens + tokenUsage.outputTokens;
-  const right = busy
-    ? "working · Esc to stop"
-    : (totalTokens > 0
-      ? `${formatNum(tokenUsage.inputTokens)}→ ${formatNum(tokenUsage.outputTokens)}↗ ${tokenUsage.cost.toFixed(4)}`
-      : `~${estimateTokens(state.chatHistory)} token`);
-  const text = `${left} | ${mid} | ${right}`;
+  const usagePart = totalTokens > 0
+    ? `↑${formatNum(tokenUsage.inputTokens)} ↓${formatNum(tokenUsage.outputTokens)} $${tokenUsage.cost.toFixed(4)}`
+    : "";
+
+  // 上下文占用段：当前会话占了模型上下文窗口多少。按 pi 的阈值上色（>90% 红，>70% 黄）。
+  const contextWindow = getContextWindow(currentResolved?.model ?? "");
+  const contextTokens = estimateActiveContextTokens(state);
+  const percent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
+  const contextStr = contextWindow > 0
+    ? `${percent.toFixed(1)}%/${formatNum(contextWindow)}`
+    : `~${formatNum(contextTokens)} token`;
+  const contextColor = percent > 90 ? "red" : percent > 70 ? "yellow" : "gray";
+
+  // 左半部分拼成一行，统一灰色；上下文段单独上色；忙碌时尾部加停止提示。
+  const leadParts = [left, mid];
+  if (usagePart) leadParts.push(usagePart);
+  const lead = `${leadParts.join(" | ")} | `;
+  const tail = busy ? " · Esc to stop" : "";
 
   return (
     <Text color="gray" wrap="truncate">
-      {ellipsize(text, width)}
+      {lead}
+      <Text color={contextColor}>{contextStr}</Text>
+      {tail}
     </Text>
   );
 }
@@ -866,9 +873,9 @@ async function sessionStatus(state: AgentState, tokenUsage?: TokenUsage): Promis
     `session  ${state.sessionId}`,
     `turns    ${state.turnCount}`,
     state.goal ? `goal     ${state.goal.status} | ${state.goal.tokensUsed} tokens | ${state.goal.objective}` : "",
-    `context  ~${estimateActiveContextTokens(state)} tokens | compacted: ${state.compactCount} times`,
+    contextStatusLine(state),
     tokenUsage && tokenUsage.inputTokens + tokenUsage.outputTokens > 0
-      ? `tokens   ${formatNum(tokenUsage.inputTokens)} in → ${formatNum(tokenUsage.outputTokens)} out  ${tokenUsage.cost.toFixed(4)}`
+      ? `tokens   ${formatNum(tokenUsage.inputTokens)} in → ${formatNum(tokenUsage.outputTokens)} out | cached ${formatNum(tokenUsage.cachedInputTokens)} | $${tokenUsage.cost.toFixed(4)} (session total)`
       : `tokens   ~${estimateTokens(state.chatHistory)} (estimated)`,
     `mcp      ${mcpSummary.connected} connected | ${mcpSummary.degraded} degraded | ${mcpSummary.disconnected} disconnected | ${mcpSummary.enabled} enabled`,
     `team     ${teammateManager.listMembers().length} teammates | lead inbox: ${leadUnread}`,
@@ -1326,7 +1333,11 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
 
   const messageCounterRef = useRef(initialRestoredMessages.length + (startupResume.startupMessage ? 1 : 0));
   const [sessionKey, setSessionKey] = useState(0);
-  const [totalTokenUsage, setTotalTokenUsage] = useState<TokenUsage>({ inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cost: 0 });
+  // 状态栏展示的是"会话累计"用量。恢复 session 时从快照的累计值起算，
+  // 否则从零开始（旧快照没有该字段时同样回落到零）。
+  const [totalTokenUsage, setTotalTokenUsage] = useState<TokenUsage>(
+    () => startupResume.snapshot?.state.cumulativeUsage ?? zeroUsage(),
+  );
   const assistantMessageIdRef = useRef<string | undefined>(undefined);
   const thinkingMessageIdRef = useRef<string | undefined>(undefined);
   const skipSubmitRef = useRef(false);
@@ -1588,6 +1599,8 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
       roundsSinceTask: 0,
       compactCount: 0,
     };
+    // 状态栏累计用量随会话切换：恢复 session 用其快照累计值，/new 则归零。
+    setTotalTokenUsage(agentStateRef.current.cumulativeUsage ?? zeroUsage());
 
     const restoredMessages = snapshot ? restoreMessages(snapshot.messages) : [];
     messageCounterRef.current = restoredMessages.length;

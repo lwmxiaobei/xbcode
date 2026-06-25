@@ -31,6 +31,9 @@ export type AgentState = {
   launchedAt: number;
   roundsSinceTask: number;
   compactCount: number;
+  // 整个会话的累计 token 用量（跨所有轮次，不随单轮重置）。
+  // 旧 session 快照可能没有此字段，读取处需做兜底。
+  cumulativeUsage?: TokenUsage;
   goal?: GoalState;
 };
 

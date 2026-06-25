@@ -746,7 +746,7 @@ export const BASE_TOOLS = [
     type: "function",
     name: "grep",
     description:
-      "Search file contents with ripgrep (full regex, .gitignore-aware). Prefer this over `bash grep`: the output is capped (default 250 lines) so your context cannot be flooded. For open-ended multi-round exploration, dispatch the `task` tool with the explore subagent instead.",
+      "Search file contents with ripgrep (full regex, .gitignore-aware). Prefer this over `bash grep`: the output is capped (default 250 lines) so your context cannot be flooded. For open-ended multi-round exploration, dispatch the `subagent` tool with the explore subagent instead.",
     parameters: {
       type: "object",
       properties: {
@@ -1019,7 +1019,7 @@ export const BASE_TOOLS = [
 // `task` 是主 agent 独有的能力，用于派生一次性子代理，不下放给 teammate。
 export const TASK_TOOL = {
   type: "function",
-  name: "task",
+  name: "subagent",
   description:
     `Dispatch a subtask to an independent sub-agent with a clean context. Returns only the sub-agent's final summary.
 Available subagent types:

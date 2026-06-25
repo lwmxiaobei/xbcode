@@ -3,7 +3,7 @@ import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import type { ChatMessage, ResponseInputItem } from "./types.js";
 
-const KEEP_RECENT = 3;
+const KEEP_RECENT = 10;
 const TOKEN_THRESHOLD = 50000;
 const TRANSCRIPT_DIR = ".transcripts";
 const COMPACT_INPUT_CHAR_LIMIT = 120000;

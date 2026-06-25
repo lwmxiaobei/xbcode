@@ -66,8 +66,6 @@ function buildEnvSection(workdir: string): string {
 }
 
 // 下面这些常量对应 Claude Code 可见系统提示词里的核心 section，
-// 但文案里引用的都是 code-agent 实际暴露的工具名（bash/read_file/edit_file 等），
-// 避免告诉模型它拥有其实并不存在的工具（例如 Glob/Grep/TaskCreate）。
 
 const INTRO_SECTION = [
   "You are a coding agent, a CLI-based software engineering assistant.",
@@ -120,8 +118,8 @@ const USING_TOOLS_SECTION = [
   "  - Reserve `bash` for system commands, builds, tests, git operations, and shell-only tasks.",
   "- Use `task_create` / `task_update` / `task_list` to break down and track multi-step work. Mark each task `completed` as soon as it is done; do not batch multiple tasks before updating status.",
   "- Call `load_skill` before tackling an unfamiliar domain when a relevant skill is listed — skills carry curated knowledge that shortens discovery.",
-  "- Use the `task` tool to dispatch independent, bounded work to a sub-agent with a clean context (e.g., broad code search, isolated refactor). Sub-agents cannot spawn further sub-agents.",
-  "- Use `teammate_spawn` / `message_send` / `lead_inbox` only when a long-running collaborator is actually needed; for one-shot work prefer `task`.",
+  "- Use the `subagent` tool to dispatch independent, bounded work to a sub-agent with a clean context (e.g., broad code search, isolated refactor). Sub-agents cannot spawn further sub-agents.",
+  "- Use `teammate_spawn` / `message_send` / `lead_inbox` only when a long-running collaborator is actually needed; for one-shot work prefer `subagent`.",
   "- You can call multiple tools in a single response. When calls are independent, issue them in parallel. Only serialize calls that have data dependencies on earlier results.",
   "- File paths in tool arguments are not sandboxed. Relative paths resolve from the primary working directory, and absolute paths or `..` segments are allowed. Treat files outside the primary working directory as higher risk, especially before modifying them.",
 ].join("\n");
