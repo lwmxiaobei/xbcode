@@ -12,6 +12,7 @@ import { SkillLoader } from "./skills/index.js";
 import { handleListMcpResources, handleMcpCall, handleReadMcpResource } from "./mcp/runtime.js";
 import { describeSubagentsForHumans } from "./subagents.js";
 import type { ToolArgs } from "./types.js";
+import { validateToolArgs } from "./agent/tool-args.js";
 
 const execAsync = promisify(exec);
 // execFile 不走 shell，把参数以数组形式传给进程，正则 pattern 里的特殊字符不会被 shell 二次解析。
@@ -1224,7 +1225,11 @@ export const BASE_CHAT_TOOLS = toChatTools(BASE_TOOLS);
 export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { signal?: AbortSignal }) => Promise<string> | string> = {
   bash: ({ command }, control) => runBash(String(command), control?.signal),
   read_file: ({ path: filePath, limit }) => runRead(String(filePath), toOptionalNumber(limit)),
-  write_file: ({ path: filePath, content }) => runWrite(String(filePath), String(content)),
+  write_file: (args) => {
+    const validationError = validateToolArgs("write_file", args);
+    if (validationError) return validationError;
+    return runWrite(args.path as string, args.content as string);
+  },
   edit_file: ({ path: filePath, old_text, new_text }) => runEdit(String(filePath), String(old_text), String(new_text)),
   glob: ({ pattern, path: p }, control) => runGlob(String(pattern), toOptionalString(p), control?.signal),
   grep: (args, control) => runGrep(args, control?.signal),

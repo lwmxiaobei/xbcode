@@ -18,8 +18,7 @@ import { BASE_CHAT_TOOLS, BASE_TOOLS, BASE_TOOL_HANDLERS } from "./tools.js";
 import { extractAssistantText } from "./agent/messages.js";
 import type { PreparedToolRuntime, ToolHandlerMap } from "./agent/runtime-types.js";
 import { streamChatCompletion, streamResponse } from "./agent/streams.js";
-import { runToolCall } from "./agent/tool-call.js";
-import { safeJsonParse } from "./agent/tool-args.js";
+import { executeToolCall, runToolCall } from "./agent/tool-call.js";
 import type {
   ChatMessage,
   ResponseInputItem,
@@ -195,16 +194,12 @@ async function subAgentLoopChatCompletions(
     if (toolCalls.length === 0) break;
 
     for (const toolCall of toolCalls) {
-      const name = String(toolCall.function?.name ?? "unknown_tool");
-      const args = safeJsonParse(String(toolCall.function?.arguments ?? "{}"));
-      const handler = runtime.handlers[name];
-      const outputText = handler ? await handler(args) : `Unknown tool: ${name}`;
-      bridge.pushTool(name, args, outputText);
+      const result = await executeToolCall(toolCall, bridge, runtime.handlers);
 
       history.push({
         role: "tool",
         tool_call_id: toolCall.id,
-        content: outputText,
+        content: result.output,
       });
     }
   }

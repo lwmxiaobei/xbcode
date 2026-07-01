@@ -19,11 +19,8 @@ import type { ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, 
 import { ResponseStreamError, TurnInterruptedError, throwIfAborted } from "./agent/interrupt.js";
 import { buildAssistantResponseMessage, buildChatUserMessageContent, buildCompactedResponsesQuery, buildInterruptedResponsesContext, buildUserResponseMessage, cloneResponseReplayItem, collectReplayableResponseOutput, extractAssistantText, repairInterruptedToolCallHistory, shouldPreserveChatReasoningContent } from "./agent/messages.js";
 import type { PreparedToolRuntime, RunControl, ToolHandlerMap } from "./agent/runtime-types.js";
-import { buildToolRejectionOutput, toolNeedsApproval } from "./agent/tool-approval.js";
-import { safeJsonParse } from "./agent/tool-args.js";
-import { runToolCall } from "./agent/tool-call.js";
+import { executeToolCall, runToolCall } from "./agent/tool-call.js";
 import { streamChatCompletion, streamResponse } from "./agent/streams.js";
-import { ASK_USER_QUESTION_TOOL_NAME, runAskUserQuestion } from "./agent/user-choice.js";
 export { TurnInterruptedError, isTurnInterruptedError } from "./agent/interrupt.js";
 export { ASK_USER_QUESTION_TOOL_NAME, parseUserChoiceQuestions, formatUserChoiceResult } from "./agent/user-choice.js";
 export { extractAssistantTextFromResponseOutput, getMissingAssistantText, shouldPreserveChatReasoningContent } from "./agent/messages.js";
@@ -519,24 +516,12 @@ async function agentLoopWithChatCompletions(
 
     for (const toolCall of toolCalls) {
       throwIfAborted(control?.signal);
-      const name = String(toolCall.function?.name ?? "unknown_tool");
-      const args = safeJsonParse(String(toolCall.function?.arguments ?? "{}"));
-
-      let outputText: string;
-      if (name === ASK_USER_QUESTION_TOOL_NAME) {
-        outputText = await runAskUserQuestion(args, bridge);
-      } else if (toolNeedsApproval(name) && (await bridge.requestToolApproval(name, args)) === "rejected") {
-        outputText = buildToolRejectionOutput(name);
-      } else {
-        const handler = handlers[name];
-        outputText = handler ? await handler(args, control) : `Unknown tool: ${name}`;
-      }
-      bridge.pushTool(name, args, outputText);
+      const result = await executeToolCall(toolCall, bridge, handlers, control, true);
 
       history.push({
         role: "tool",
         tool_call_id: toolCall.id,
-        content: outputText,
+        content: result.output,
       });
 
       throwIfAborted(control?.signal);
