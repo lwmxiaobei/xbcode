@@ -107,3 +107,63 @@ test("runToolCall rejects a complete write_file object with a missing path befor
   assert.equal(approvalCalls, 0);
   assert.match(String(output.output), /^Error: Invalid arguments for write_file: path must be a non-empty string/);
 });
+
+test("runToolCall rejects missing arguments for side-effect tools before approval or handler execution", async () => {
+  const cases = [
+    {
+      name: "bash",
+      arguments: "{}",
+      expected: /^Error: Invalid arguments for bash: command must be a non-empty string/,
+    },
+    {
+      name: "edit_file",
+      arguments: "{\"path\":\"a.txt\",\"new_text\":\"patched\"}",
+      expected: /^Error: Invalid arguments for edit_file: old_text must be a non-empty string/,
+    },
+    {
+      name: "task_create",
+      arguments: "{}",
+      expected: /^Error: Invalid arguments for task_create: subject must be a non-empty string/,
+    },
+  ];
+
+  for (const item of cases) {
+    const events: Array<{ name: string; args: ToolArgs; result: string }> = [];
+    let handlerCalls = 0;
+    let approvalCalls = 0;
+    const bridge = createBridge(events);
+    bridge.requestToolApproval = async () => {
+      approvalCalls += 1;
+      return "approved";
+    };
+
+    const output = await runToolCall(
+      {
+        type: "function_call",
+        call_id: `call_${item.name}`,
+        name: item.name,
+        arguments: item.arguments,
+      },
+      bridge,
+      {
+        [item.name]: () => {
+          handlerCalls += 1;
+          return "unexpected";
+        },
+      },
+      undefined,
+      true,
+    );
+
+    assert.equal(handlerCalls, 0, item.name);
+    assert.equal(approvalCalls, 0, item.name);
+    assert.match(String(output.output), item.expected);
+    assert.deepEqual(events, [
+      {
+        name: item.name,
+        args: JSON.parse(item.arguments) as ToolArgs,
+        result: output.output as string,
+      },
+    ]);
+  }
+});

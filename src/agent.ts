@@ -17,10 +17,11 @@ import { dispatchSubagent } from "./subagent-runner.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";
 import type { ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ToolApprovalDecision, UserChoiceQuestion } from "./types.js";
 import { ResponseStreamError, TurnInterruptedError, throwIfAborted } from "./agent/interrupt.js";
-import { buildAssistantResponseMessage, buildChatUserMessageContent, buildCompactedResponsesQuery, buildInterruptedResponsesContext, buildUserResponseMessage, cloneResponseReplayItem, collectReplayableResponseOutput, extractAssistantText, repairInterruptedToolCallHistory, shouldPreserveChatReasoningContent } from "./agent/messages.js";
+import { buildAssistantResponseMessage, buildChatUserMessageContent, buildCompactedResponsesQuery, buildInterruptedResponsesContext, buildResponseContinuation, buildUserResponseMessage, cloneResponseReplayItem, collectReplayableResponseOutput, extractAssistantText, repairInterruptedToolCallHistory, shouldPreserveChatReasoningContent } from "./agent/messages.js";
 import type { PreparedToolRuntime, RunControl, ToolHandlerMap } from "./agent/runtime-types.js";
 import { executeToolCall, runToolCall } from "./agent/tool-call.js";
 import { streamChatCompletion, streamResponse } from "./agent/streams.js";
+import { accumulateTokenUsage } from "./agent/usage.js";
 export { TurnInterruptedError, isTurnInterruptedError } from "./agent/interrupt.js";
 export { ASK_USER_QUESTION_TOOL_NAME, parseUserChoiceQuestions, formatUserChoiceResult } from "./agent/user-choice.js";
 export { extractAssistantTextFromResponseOutput, getMissingAssistantText, shouldPreserveChatReasoningContent } from "./agent/messages.js";
@@ -412,7 +413,7 @@ async function agentLoop(
 
     if (toolCalls.length === 0) {
       state.responseHistory = replayHistory.map((item) => cloneResponseReplayItem(item));
-      return currentResponseId;
+      return usesStatelessReplay ? undefined : currentResponseId;
     }
 
     const hasTaskCall = toolCalls.some((tc: any) => String(tc.name).startsWith("task_"));
@@ -434,12 +435,14 @@ async function agentLoop(
 
     replayHistory.push(...results.map((item) => cloneResponseReplayItem(item)));
 
-    if (usesStatelessReplay) {
-      nextInput = replayHistory;
-      currentResponseId = undefined;
-    } else {
-      nextInput = results;
-    }
+    const continuation = buildResponseContinuation(
+      replayHistory,
+      results,
+      currentResponseId,
+      !usesStatelessReplay,
+    );
+    nextInput = continuation.input;
+    currentResponseId = continuation.previousResponseId;
   }
 }
 
@@ -565,14 +568,8 @@ async function runTurn(
     cost: 0,
   });
   const onUsage = (u: TokenUsage) => {
-    turnUsage.inputTokens += u.inputTokens;
-    turnUsage.outputTokens += u.outputTokens;
-    turnUsage.cachedInputTokens += u.cachedInputTokens;
-    turnUsage.cost += u.cost;
-    cumulativeUsage.inputTokens += u.inputTokens;
-    cumulativeUsage.outputTokens += u.outputTokens;
-    cumulativeUsage.cachedInputTokens += u.cachedInputTokens;
-    cumulativeUsage.cost += u.cost;
+    accumulateTokenUsage(turnUsage, u);
+    accumulateTokenUsage(cumulativeUsage, u);
     bridge.updateUsage({ ...cumulativeUsage });
   };
 

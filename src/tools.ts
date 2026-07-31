@@ -355,6 +355,28 @@ type BraveSearchResult = {
   description?: unknown;
 };
 
+type VolcengineSearchResult = {
+  Title?: unknown;
+  Url?: unknown;
+  Snippet?: unknown;
+  Summary?: unknown;
+  SiteName?: unknown;
+  PublishTime?: unknown;
+};
+
+type VolcengineSearchPayload = {
+  ResponseMetadata?: {
+    RequestId?: unknown;
+    Error?: {
+      Code?: unknown;
+      Message?: unknown;
+    };
+  };
+  Result?: {
+    WebResults?: unknown;
+  };
+};
+
 function clampSearchCount(value: number | undefined): number {
   if (!Number.isFinite(value)) return WEB_SEARCH_DEFAULT_RESULTS;
   return Math.min(Math.max(Math.trunc(value as number), 1), WEB_SEARCH_MAX_RESULTS);
@@ -365,14 +387,122 @@ function normalizeSearchText(value: unknown): string {
   return text.includes("<") ? stripHtml(text) : text;
 }
 
-async function runWebSearch(query: string, countRaw?: number, signal?: AbortSignal): Promise<string> {
-  const apiKey = process.env.BRAVE_SEARCH_API_KEY;
-  if (!apiKey) return "Error: BRAVE_SEARCH_API_KEY is not set";
-
+function validateSearchQuery(query: string, maxLength: number): string | null {
   const normalizedQuery = query.trim();
   if (!normalizedQuery) return "Error: query is required";
-  if (normalizedQuery.length > 500) return "Error: query is too long (>500 chars)";
+  if (normalizedQuery.length > maxLength) return `Error: query is too long (>${maxLength} chars)`;
+  return null;
+}
 
+function getVolcengineSearchApiKey(): string | undefined {
+  return process.env.ASK_ECHO_SEARCH_INFINITY_API_KEY
+    || process.env.VOLCENGINE_SEARCH_API_KEY
+    || process.env.ARK_SEARCH_API_KEY;
+}
+
+async function runVolcengineWebSearch(
+  apiKey: string,
+  query: string,
+  countRaw?: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const queryError = validateSearchQuery(query, 100);
+  if (queryError) return queryError;
+
+  const normalizedQuery = query.trim();
+  const count = clampSearchCount(countRaw);
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), WEB_SEARCH_TIMEOUT_MS);
+  const combinedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
+
+  let response: Response;
+  try {
+    response = await fetch("https://open.feedcoopapi.com/search_api/web_search", {
+      method: "POST",
+      signal: combinedSignal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+        "x-traffic-tag": "xbcode_web_search",
+      },
+      body: JSON.stringify({
+        Query: normalizedQuery,
+        SearchType: "web",
+        Count: count,
+        NeedSummary: true,
+      }),
+    });
+  } catch (error) {
+    clearTimeout(timer);
+    if (signal?.aborted) return "Error: Aborted";
+    if (timeoutController.signal.aborted) return `Error: Timeout (${WEB_SEARCH_TIMEOUT_MS / 1000}s)`;
+    return `Error: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  clearTimeout(timer);
+
+  if (!response.ok) {
+    return `Error: HTTP ${response.status} ${response.statusText || ""}`.trim();
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    return `Error: failed to parse search response: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  const obj = payload as VolcengineSearchPayload;
+  const apiError = obj.ResponseMetadata?.Error;
+  if (apiError) {
+    const code = normalizeSearchText(apiError.Code) || "UnknownError";
+    const message = normalizeSearchText(apiError.Message) || "Volcengine search request failed";
+    return `Error: Volcengine Search ${code}: ${message}`;
+  }
+
+  const results = Array.isArray(obj.Result?.WebResults)
+    ? (obj.Result.WebResults as VolcengineSearchResult[])
+    : [];
+  if (results.length === 0) return "No search results";
+
+  const formatted = results.slice(0, count).map((item, index) => {
+    const title = normalizeSearchText(item.Title) || "(untitled)";
+    const resultUrl = normalizeSearchText(item.Url);
+    const snippet = normalizeSearchText(item.Snippet);
+    const summary = normalizeSearchText(item.Summary);
+    const siteName = normalizeSearchText(item.SiteName);
+    const publishTime = normalizeSearchText(item.PublishTime);
+    const lines = [
+      `${index + 1}. ${title}`,
+      `URL: ${resultUrl}`,
+      `Snippet: ${snippet}`,
+    ];
+    if (summary && summary !== snippet) lines.push(`Summary: ${summary}`);
+    if (siteName) lines.push(`Site: ${siteName}`);
+    if (publishTime) lines.push(`Published: ${publishTime}`);
+    return lines.join("\n");
+  }).join("\n\n");
+
+  const header = [
+    `Query: ${normalizedQuery}`,
+    `Results: ${Math.min(results.length, count)}`,
+    "Provider: Volcengine Search Infinity",
+    `Request ID: ${normalizeSearchText(obj.ResponseMetadata?.RequestId) || "(unknown)"}`,
+  ].join("\n");
+  return truncateToolOutput(`${header}\n---\n${formatted}`);
+}
+
+async function runBraveWebSearch(
+  apiKey: string,
+  query: string,
+  countRaw?: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const queryError = validateSearchQuery(query, 500);
+  if (queryError) return queryError;
+
+  const normalizedQuery = query.trim();
   const count = clampSearchCount(countRaw);
   const url = new URL("https://api.search.brave.com/res/v1/web/search");
   url.searchParams.set("q", normalizedQuery);
@@ -436,6 +566,20 @@ async function runWebSearch(query: string, countRaw?: number, signal?: AbortSign
     "Provider: Brave Search",
   ].join("\n");
   return truncateToolOutput(`${header}\n---\n${formatted}`);
+}
+
+async function runWebSearch(query: string, countRaw?: number, signal?: AbortSignal): Promise<string> {
+  const volcengineApiKey = getVolcengineSearchApiKey();
+  if (volcengineApiKey) {
+    return runVolcengineWebSearch(volcengineApiKey, query, countRaw, signal);
+  }
+
+  const braveApiKey = process.env.BRAVE_SEARCH_API_KEY;
+  if (braveApiKey) {
+    return runBraveWebSearch(braveApiKey, query, countRaw, signal);
+  }
+
+  return "Error: ASK_ECHO_SEARCH_INFINITY_API_KEY is not set";
 }
 
 async function runWebFetch(rawUrl: string, signal?: AbortSignal): Promise<string> {
@@ -998,7 +1142,7 @@ export const BASE_TOOLS = [
     type: "function",
     name: "web_search",
     description:
-      "Search the web and return concise results with titles, URLs, and snippets. Use web_fetch afterward to read selected pages. Requires BRAVE_SEARCH_API_KEY.",
+      "Search the web and return current results with titles, URLs, snippets, summaries, site names, and publish times. Uses Volcengine Search Infinity when ASK_ECHO_SEARCH_INFINITY_API_KEY is configured, with BRAVE_SEARCH_API_KEY as a compatibility fallback. Use web_fetch afterward to read selected pages.",
     parameters: {
       type: "object",
       properties: {
@@ -1223,43 +1367,60 @@ export const BASE_CHAT_TOOLS = toChatTools(BASE_TOOLS);
 // 这里是“工具名 -> 实际执行函数”的路由表。
 // `mcp_call` 在这一层接入到 MCP runtime，由后者继续完成初始化、校验和分发。
 export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { signal?: AbortSignal }) => Promise<string> | string> = {
-  bash: ({ command }, control) => runBash(String(command), control?.signal),
+  bash: (args, control) => {
+    const validationError = validateToolArgs("bash", args);
+    if (validationError) return validationError;
+    return runBash(args.command as string, control?.signal);
+  },
   read_file: ({ path: filePath, limit }) => runRead(String(filePath), toOptionalNumber(limit)),
   write_file: (args) => {
     const validationError = validateToolArgs("write_file", args);
     if (validationError) return validationError;
     return runWrite(args.path as string, args.content as string);
   },
-  edit_file: ({ path: filePath, old_text, new_text }) => runEdit(String(filePath), String(old_text), String(new_text)),
+  edit_file: (args) => {
+    const validationError = validateToolArgs("edit_file", args);
+    if (validationError) return validationError;
+    return runEdit(args.path as string, args.old_text as string, args.new_text as string);
+  },
   glob: ({ pattern, path: p }, control) => runGlob(String(pattern), toOptionalString(p), control?.signal),
   grep: (args, control) => runGrep(args, control?.signal),
   list_mcp_resources: (args) => handleListMcpResources(args),
   read_mcp_resource: (args) => handleReadMcpResource(args),
   mcp_call: (args) => handleMcpCall(args),
-  task_create: async ({ subject, description, owner, assignee }) =>
-    await taskManager.create(
-      String(subject),
-      toOptionalString(description),
-      toOptionalString(owner) ?? LEAD_NAME,
-      toOptionalString(assignee),
-    ),
-  task_update: async ({ task_id, status, blocked_by, blocks, assignee, result_summary, blocked_reason }) =>
-    await taskManager.update(
-      Number(task_id),
-      toOptionalString(status),
-      blocked_by as number[] | undefined,
-      blocks as number[] | undefined,
-      toOptionalString(assignee),
-      toOptionalString(result_summary),
-      toOptionalString(blocked_reason),
-    ),
-  task_assign: async ({ task_id, assignee }) => {
-    const task = await taskManager.getTask(Number(task_id));
+  task_create: async (args) => {
+    const validationError = validateToolArgs("task_create", args);
+    if (validationError) return validationError;
+    return await taskManager.create(
+      args.subject as string,
+      toOptionalString(args.description),
+      toOptionalString(args.owner) ?? LEAD_NAME,
+      toOptionalString(args.assignee),
+    );
+  },
+  task_update: async (args) => {
+    const validationError = validateToolArgs("task_update", args);
+    if (validationError) return validationError;
+    return await taskManager.update(
+      args.task_id as number,
+      toOptionalString(args.status),
+      args.blocked_by as number[] | undefined,
+      args.blocks as number[] | undefined,
+      toOptionalString(args.assignee),
+      toOptionalString(args.result_summary),
+      toOptionalString(args.blocked_reason),
+    );
+  },
+  task_assign: async (args) => {
+    const validationError = validateToolArgs("task_assign", args);
+    if (validationError) return validationError;
+
+    const task = await taskManager.getTask(args.task_id as number);
     if (!task) {
-      return `Error: Task ${Number(task_id)} not found.`;
+      return `Error: Task ${args.task_id as number} not found.`;
     }
 
-    const normalizedAssignee = String(assignee ?? "").trim();
+    const normalizedAssignee = (args.assignee as string).trim();
     if (!normalizedAssignee) {
       return "Error: assignee is required.";
     }
@@ -1276,36 +1437,45 @@ export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { sig
     teammateManager.wake(normalizedAssignee);
     return updated;
   },
-  task_complete: async ({ task_id, result_summary }) => {
-    const task = await taskManager.getTask(Number(task_id));
+  task_complete: async (args) => {
+    const validationError = validateToolArgs("task_complete", args);
+    if (validationError) return validationError;
+
+    const task = await taskManager.getTask(args.task_id as number);
     if (!task) {
-      return `Error: Task ${Number(task_id)} not found.`;
+      return `Error: Task ${args.task_id as number} not found.`;
     }
 
     // P1 阶段不再向 lead 发协议消息（task_completed）。task manager 的状态变更
     // 是 lead 通过 task_list/task_get 自查的依据；P3 协议消息阶段会用独立 schema 重做。
-    const updated = await taskManager.update(task.id, "completed", undefined, undefined, undefined, String(result_summary ?? ""));
+    const updated = await taskManager.update(task.id, "completed", undefined, undefined, undefined, args.result_summary as string);
     return updated;
   },
-  task_block: async ({ task_id, reason }) => {
-    const task = await taskManager.getTask(Number(task_id));
+  task_block: async (args) => {
+    const validationError = validateToolArgs("task_block", args);
+    if (validationError) return validationError;
+
+    const task = await taskManager.getTask(args.task_id as number);
     if (!task) {
-      return `Error: Task ${Number(task_id)} not found.`;
+      return `Error: Task ${args.task_id as number} not found.`;
     }
 
     // P1：同 task_complete，删除 messageBus.send；仅写入 task manager 状态。
-    const text = String(reason ?? "");
+    const text = args.reason as string;
     const updated = await taskManager.update(task.id, "blocked", undefined, undefined, undefined, undefined, text);
     return updated;
   },
-  task_fail: async ({ task_id, reason }) => {
-    const task = await taskManager.getTask(Number(task_id));
+  task_fail: async (args) => {
+    const validationError = validateToolArgs("task_fail", args);
+    if (validationError) return validationError;
+
+    const task = await taskManager.getTask(args.task_id as number);
     if (!task) {
-      return `Error: Task ${Number(task_id)} not found.`;
+      return `Error: Task ${args.task_id as number} not found.`;
     }
 
     // P1：同 task_complete，删除 messageBus.send；仅写入 task manager 状态。
-    const text = String(reason ?? "");
+    const text = args.reason as string;
     const updated = await taskManager.update(task.id, "failed", undefined, undefined, undefined, text);
     return updated;
   },

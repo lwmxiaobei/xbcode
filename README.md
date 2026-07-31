@@ -111,11 +111,13 @@ The generated default config now prefers Volcengine Ark and defaults to `doubao-
 
 ### Web search
 
-The built-in `web_search` tool uses Brave Search API. Configure the API key in the project `.env` file or in the current shell:
+The built-in `web_search` tool uses Volcengine Search Infinity. Create a dedicated search API key in the [Volcengine console](https://console.volcengine.com/search-infinity/api-key), then configure it in the project `.env` file or in the current shell:
 
 ```bash
-BRAVE_SEARCH_API_KEY=your Brave Search API key
+ASK_ECHO_SEARCH_INFINITY_API_KEY=your Volcengine search API key
 ```
+
+`VOLCENGINE_SEARCH_API_KEY` and `ARK_SEARCH_API_KEY` are also accepted as aliases. The search key is separate from the Ark model API key. If no Volcengine search key is present, an existing `BRAVE_SEARCH_API_KEY` remains supported as a compatibility fallback.
 
 When the model needs current information, it can call `web_search` to discover candidate results and then use `web_fetch` to read selected pages.
 
@@ -202,6 +204,14 @@ Providers are configured in `~/.xbcode/settings.json`:
         "type": "oauth"
       }
     },
+    "deepseek": {
+      "models": [
+        { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" }
+      ],
+      "apiKey": "YOUR_DEEPSEEK_API_KEY",
+      "baseURL": "https://api.deepseek.com",
+      "apiMode": "responses"
+    },
     "aliyun": {
       "models": ["qwen-plus", "qwen-turbo", "qwen-max"],
       "apiKey": "sk-xxx",
@@ -246,7 +256,11 @@ Key fields:
 - `auth`
   Optional provider auth mode. Today only `{ "type": "oauth" }` is supported, and only for OpenAI.
 
-API mode can be explicit, or derived automatically. For example, DeepSeek-, DashScope-, and Volcengine Ark-compatible base URLs default to `chat-completions`.
+API mode can be explicit or derived automatically from the base URL and model. The official DeepSeek endpoint uses `responses` automatically for `deepseek-v4-flash`; other DeepSeek models, DashScope-compatible endpoints, and Volcengine Ark-compatible endpoints default to `chat-completions`.
+
+DeepSeek's official Responses API is stateless and does not support `previous_response_id`. `xbcode` automatically replays local Responses history across user turns and tool-call continuations, so no protocol proxy is required. DeepSeek currently exposes Responses API only for `deepseek-v4-flash`; keep models that have not enabled Responses on `chat-completions`.
+
+The built-in DeepSeek V4 metadata matches the provider table: both `deepseek-v4-flash` and `deepseek-v4-pro` use a 1M context window and allow up to 384K output tokens. Native prices are stored in CNY per million tokens. Flash cached input, uncached input, and output cost ¥0.02, ¥1, and ¥2; Pro costs ¥0.025, ¥3, and ¥6. The status bar displays DeepSeek charges with `¥` and keeps them separate from USD charges.
 
 For Volcengine Ark, configure the provider with your Ark API key, use `https://ark.cn-beijing.volces.com/api/coding/v3` as `baseURL`, and put the model IDs you can access into `models`. Example IDs include `doubao-seed-2.0-code`, `doubao-seed-2.0-pro`, `doubao-seed-2.0-lite`, `doubao-seed-code`, `minimax-m2.7`, `minimax-m3`, `glm-5.1`, `deepseek-v4-flash`, `deepseek-v4-pro`, and `kimi-k2.6`.
 

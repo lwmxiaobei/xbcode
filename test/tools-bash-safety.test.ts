@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { detectDangerousCommand } from "../src/tools.js";
+import { BASE_TOOL_HANDLERS, detectDangerousCommand } from "../src/tools.js";
 
 test("rm -rf 根 / 系统目录 / 家目录 / 裸通配符被拦截", () => {
   assert.match(String(detectDangerousCommand("rm -rf /")), /root/i);
@@ -100,6 +100,12 @@ test("空白 / 空字符串输入返回 null", () => {
   assert.equal(detectDangerousCommand(""), null);
   assert.equal(detectDangerousCommand("   "), null);
   assert.equal(detectDangerousCommand("\n\t"), null);
+});
+
+test("bash 缺 command 时返回参数错误", async () => {
+  const result = await BASE_TOOL_HANDLERS.bash({});
+
+  assert.match(String(result), /^Error: Invalid arguments for bash: command must be a non-empty string/);
 });
 
 test("命令链中的危险片段也会被识别", () => {

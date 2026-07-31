@@ -15,7 +15,12 @@ import {
 import { refreshAccessToken } from "./oauth/openai.js";
 import { getSubagentDefinition, type SubagentDefinition } from "./subagents.js";
 import { BASE_CHAT_TOOLS, BASE_TOOLS, BASE_TOOL_HANDLERS } from "./tools.js";
-import { extractAssistantText } from "./agent/messages.js";
+import {
+  buildResponseContinuation,
+  cloneResponseReplayItem,
+  collectReplayableResponseOutput,
+  extractAssistantText,
+} from "./agent/messages.js";
 import type { PreparedToolRuntime, ToolHandlerMap } from "./agent/runtime-types.js";
 import { streamChatCompletion, streamResponse } from "./agent/streams.js";
 import { executeToolCall, runToolCall } from "./agent/tool-call.js";
@@ -114,11 +119,13 @@ async function subAgentLoopResponses(
   description: string,
   bridge: UiBridge,
   definition: SubagentDefinition,
+  supportsPreviousResponseId: boolean,
 ): Promise<string> {
   const runtime = buildSubagentRuntime(definition);
-  let nextInput: ResponseInputItem[] | string = [
-    { role: "user", content: [{ type: "input_text", text: description }] },
+  const replayHistory: ResponseInputItem[] = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: description }] },
   ];
+  let nextInput: ResponseInputItem[] | string = replayHistory;
   let currentResponseId: string | undefined;
   let lastText = "";
 
@@ -126,6 +133,7 @@ async function subAgentLoopResponses(
   for (let round = 0; round < definition.maxRounds; round += 1) {
     const response = await streamResponse(client, model, system, false, nextInput, currentResponseId, bridge, runtime.responseTools, undefined, undefined, caller);
     currentResponseId = response.id;
+    replayHistory.push(...collectReplayableResponseOutput(response.output));
 
     const textItems = Array.isArray(response.output)
       ? response.output.filter((item: any) => item.type === "message" || item.type === "text")
@@ -156,7 +164,15 @@ async function subAgentLoopResponses(
     for (const toolCall of toolCalls) {
       results.push(await runToolCall(toolCall, bridge, runtime.handlers));
     }
-    nextInput = results;
+    replayHistory.push(...results.map((item) => cloneResponseReplayItem(item)));
+    const continuation = buildResponseContinuation(
+      replayHistory,
+      results,
+      currentResponseId,
+      supportsPreviousResponseId,
+    );
+    nextInput = continuation.input;
+    currentResponseId = continuation.previousResponseId;
   }
 
   return lastText || "(sub-agent completed with no text output)";
@@ -364,14 +380,22 @@ export async function runSubagentHeadless(): Promise<number> {
       },
     });
 
-    const { client } = buildAgentClient(resolved, authResult.state);
+    const { client, supportsPreviousResponseId } = buildAgentClient(resolved, authResult.state);
     const definition = getSubagentDefinition(spec.subagentType);
     const subSystem = `${spec.system}\n${definition.systemPrompt}`;
     const bridge = createJsonlBridge();
 
     const result = resolved.apiMode === "chat-completions"
       ? await subAgentLoopChatCompletions(client, resolved.model, subSystem, spec.description, bridge, definition)
-      : await subAgentLoopResponses(client, resolved.model, subSystem, spec.description, bridge, definition);
+      : await subAgentLoopResponses(
+          client,
+          resolved.model,
+          subSystem,
+          spec.description,
+          bridge,
+          definition,
+          supportsPreviousResponseId,
+        );
 
     emit({ type: "result", text: result });
     return 0;

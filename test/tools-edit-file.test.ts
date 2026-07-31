@@ -149,6 +149,21 @@ test("edit_file 找不到 old_text 时返回明确错误", () => {
   }
 });
 
+test("edit_file 缺 old_text 时不会把字符串 undefined 当成待替换内容", () => {
+  const filePath = setupTmpFile("missing-old.ts", "const value = undefined;\n");
+  try {
+    const result = BASE_TOOL_HANDLERS.edit_file({
+      path: filePath,
+      new_text: "patched",
+    });
+
+    assert.match(String(result), /^Error: Invalid arguments for edit_file: old_text must be a non-empty string/);
+    assert.equal(fs.readFileSync(filePath, "utf8"), "const value = undefined;\n");
+  } finally {
+    cleanup();
+  }
+});
+
 test("edit_file 当 old_text === new_text 时报错（防空替换）", () => {
   const filePath = setupTmpFile("e.ts", "same\n");
   try {

@@ -175,10 +175,15 @@ const CHAT_REASONING_CONTENT_REQUIRED_MODEL_PATTERNS = [
 ];
 
 export function shouldPreserveChatReasoningContent(model: string, showThinking: boolean): boolean {
+  const normalizedModel = model.trim();
+  // DeepSeek defaults to thinking mode and requires reasoning_content to be
+  // replayed after tool calls even when the user chooses not to render it.
+  if (/^deepseek(?:[-_.]|$)/i.test(normalizedModel)) {
+    return true;
+  }
   if (!showThinking) {
     return false;
   }
-  const normalizedModel = model.trim();
   return CHAT_REASONING_CONTENT_REQUIRED_MODEL_PATTERNS.some((pattern) => pattern.test(normalizedModel));
 }
 
@@ -200,11 +205,10 @@ export function cloneResponseReplayItem<T>(value: T): T {
  * Keep only the output items that are valid and useful for stateless replay.
  *
  * Why this exists:
- * - The ChatGPT Codex backend rejects `previous_response_id`, so later rounds
- *   must be rebuilt from prior assistant messages and function calls.
- * - Message and function-call items are enough to reconstruct the model-visible
- *   assistant state; ephemeral bookkeeping items do not help and may be invalid
- *   when sent back as input.
+ * - Stateless Responses providers such as DeepSeek and the ChatGPT Codex
+ *   backend must rebuild later rounds from prior model-visible items.
+ * - Reasoning and server-side web-search items are valid replay inputs for
+ *   DeepSeek, while ephemeral bookkeeping items do not help and may be invalid.
  * - Returning cloned objects lets callers append the items directly into
  *   `responseHistory` without worrying about shared references.
  */
@@ -219,9 +223,34 @@ export function collectReplayableResponseOutput(output: unknown): ResponseInputI
         return false;
       }
       const type = String((item as { type?: unknown }).type ?? "");
-      return type === "message" || type === "function_call";
+      return type === "message"
+        || type === "reasoning"
+        || type === "function_call"
+        || type === "web_search_call";
     })
     .map((item) => cloneResponseReplayItem(item));
+}
+
+export function buildResponseContinuation(
+  replayHistory: ResponseInputItem[],
+  incrementalInput: ResponseInputItem[],
+  responseId: string | undefined,
+  supportsPreviousResponseId: boolean,
+): {
+  input: ResponseInputItem[];
+  previousResponseId: string | undefined;
+} {
+  if (supportsPreviousResponseId) {
+    return {
+      input: incrementalInput,
+      previousResponseId: responseId,
+    };
+  }
+
+  return {
+    input: replayHistory,
+    previousResponseId: undefined,
+  };
 }
 
 export function extractAssistantText(content: unknown): string {
@@ -351,4 +380,3 @@ export function repairInterruptedToolCallHistory(history: ChatMessage[]): void {
     });
   }
 }
-

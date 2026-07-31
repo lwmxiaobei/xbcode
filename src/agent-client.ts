@@ -10,10 +10,23 @@ import {
 
 export type AgentClient = {
   client: OpenAI;
-  // ChatGPT Codex backend rejects `previous_response_id`, so OAuth sessions
-  // must replay statelessly. All other providers keep server-side chaining.
+  // Stateless Responses providers must replay local history instead of relying
+  // on `previous_response_id`.
   supportsPreviousResponseId: boolean;
 };
+
+export function providerSupportsPreviousResponseId(
+  resolved: Pick<ResolvedConfig, "apiMode" | "baseURL">,
+  isOpenAIOAuth = false,
+): boolean {
+  if (resolved.apiMode !== "responses" || isOpenAIOAuth) {
+    return false;
+  }
+
+  // DeepSeek's Responses API is explicitly stateless and silently ignores
+  // `previous_response_id`, so every continuation must replay local history.
+  return !resolved.baseURL.toLowerCase().includes("deepseek.com");
+}
 
 /**
  * Build the OpenAI client from a resolved provider config + auth state.
@@ -46,6 +59,6 @@ export function buildAgentClient(resolved: ResolvedConfig, authState?: ProviderA
 
   return {
     client: new OpenAI(clientOptions),
-    supportsPreviousResponseId: !isOpenAIOAuth,
+    supportsPreviousResponseId: providerSupportsPreviousResponseId(resolved, Boolean(isOpenAIOAuth)),
   };
 }

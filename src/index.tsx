@@ -41,7 +41,7 @@ import {
   type ResolvedConfig,
 } from "./config.js";
 import { estimateTokens, autoCompact, autoCompactResponseHistory } from "./compact.js";
-import { getContextWindow } from "./agent/model-pricing.js";
+import { getContextWindow, getMaxOutputTokens } from "./agent/model-pricing.js";
 import { buildAgentClient } from "./agent-client.js";
 import { normalizeCommand, parseStartupCommand, submissionNeedsSelectedModel } from "./commands.js";
 import { createSubmitDeduper, getSubmittedValueFromInput } from "./input-submit.js";
@@ -205,6 +205,15 @@ type StartupResumeState = {
  */
 function zeroUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cost: 0 };
+}
+
+function formatUsageCosts(usage: TokenUsage): string {
+  const usd = usage.costs?.USD ?? usage.cost;
+  const cny = usage.costs?.CNY;
+  const parts: string[] = [];
+  if (usd > 0) parts.push(`$${usd.toFixed(4)}`);
+  if (cny !== undefined && cny > 0) parts.push(`¥${cny.toFixed(4)}`);
+  return parts.join(" ");
 }
 
 // `/status` 的上下文行：估算占用 + 占模型窗口百分比 + 压缩次数。
@@ -787,8 +796,9 @@ function StatusBar({ width, busy, state, tokenUsage }: { width: number; busy: bo
 
   // 累计用量段：整段会话的 ↑输入 ↓输出 与累计费用。还没有任何 API 调用时省略。
   const totalTokens = tokenUsage.inputTokens + tokenUsage.outputTokens;
+  const costText = formatUsageCosts(tokenUsage);
   const usagePart = totalTokens > 0
-    ? `↑${formatNum(tokenUsage.inputTokens)} ↓${formatNum(tokenUsage.outputTokens)} $${tokenUsage.cost.toFixed(4)}`
+    ? `↑${formatNum(tokenUsage.inputTokens)} ↓${formatNum(tokenUsage.outputTokens)}${costText ? ` ${costText}` : ""}`
     : "";
 
   // 上下文占用段：当前会话占了模型上下文窗口多少。按 pi 的阈值上色（>90% 红，>70% 黄）。
@@ -860,6 +870,7 @@ async function sessionStatus(state: AgentState, tokenUsage?: TokenUsage): Promis
     ? `models   ${currentResolved.availableModels.join(", ")}`
     : "";
   const effectiveBaseURL = getEffectiveBaseURL(currentResolved, currentAuthState);
+  const maxOutputTokens = getMaxOutputTokens(currentResolved.model);
   const leadUnread = await messageBus.unreadCount("lead");
   return [
     `workspace ${WORKDIR}`,
@@ -869,13 +880,14 @@ async function sessionStatus(state: AgentState, tokenUsage?: TokenUsage): Promis
     `api mode ${currentResolved.apiMode}`,
     `baseURL  ${currentResolved.baseURL}`,
     `effective endpoint ${effectiveBaseURL}`,
+    maxOutputTokens ? `max output ${formatNum(maxOutputTokens)} tokens` : "",
     formatAuthSummary(currentAuthState),
     `session  ${state.sessionId}`,
     `turns    ${state.turnCount}`,
     state.goal ? `goal     ${state.goal.status} | ${state.goal.tokensUsed} tokens | ${state.goal.objective}` : "",
     contextStatusLine(state),
     tokenUsage && tokenUsage.inputTokens + tokenUsage.outputTokens > 0
-      ? `tokens   ${formatNum(tokenUsage.inputTokens)} in → ${formatNum(tokenUsage.outputTokens)} out | cached ${formatNum(tokenUsage.cachedInputTokens)} | $${tokenUsage.cost.toFixed(4)} (session total)`
+      ? `tokens   ${formatNum(tokenUsage.inputTokens)} in → ${formatNum(tokenUsage.outputTokens)} out | cached ${formatNum(tokenUsage.cachedInputTokens)}${formatUsageCosts(tokenUsage) ? ` | ${formatUsageCosts(tokenUsage)}` : ""} (session total)`
       : `tokens   ~${estimateTokens(state.chatHistory)} (estimated)`,
     `mcp      ${mcpSummary.connected} connected | ${mcpSummary.degraded} degraded | ${mcpSummary.disconnected} disconnected | ${mcpSummary.enabled} enabled`,
     `team     ${teammateManager.listMembers().length} teammates | lead inbox: ${leadUnread}`,

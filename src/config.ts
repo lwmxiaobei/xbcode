@@ -250,7 +250,11 @@ export async function clearProviderCredentials(filePath: string, providerName: s
   await writeCredentialsFile(filePath, { providers: nextProviders });
 }
 
-function resolveApiMode(baseURL: string, explicit?: string): "responses" | "chat-completions" {
+export function resolveApiMode(
+  baseURL: string,
+  explicit?: string,
+  model?: string,
+): "responses" | "chat-completions" {
   const mode = (explicit ?? "").trim().toLowerCase();
   if (["chat", "chat-completions", "chat_completions"].includes(mode)) {
     return "chat-completions";
@@ -259,10 +263,20 @@ function resolveApiMode(baseURL: string, explicit?: string): "responses" | "chat
     return "responses";
   }
   const lowerBaseURL = baseURL.toLowerCase();
+  /**
+   * DeepSeek's official endpoint now exposes Responses API for
+   * `deepseek-v4-flash`, while its other models still need Chat Completions.
+   * Keep the choice model-aware so selecting an unsupported DeepSeek model does
+   * not silently route it to `/responses`.
+   */
+  if (lowerBaseURL.includes("deepseek.com")) {
+    return model?.trim().toLowerCase() === "deepseek-v4-flash"
+      ? "responses"
+      : "chat-completions";
+  }
   // Auto-detect providers that only support Chat Completions-compatible APIs.
   if (
-    lowerBaseURL.includes("deepseek.com")
-    || lowerBaseURL.includes("dashscope.aliyuncs.com")
+    lowerBaseURL.includes("dashscope.aliyuncs.com")
     || lowerBaseURL.includes("ark.cn-beijing.volces.com")
   ) {
     return "chat-completions";
@@ -292,7 +306,7 @@ export function resolveConfig(providerName?: string, modelName?: string): Resolv
   const model = modelName ?? process.env.MODEL_ID ?? settings.defaultModel ?? "";
   const apiKey = provider?.apiKey ?? "";
   const baseURL = provider?.baseURL ?? "https://api.openai.com/v1";
-  const apiMode = resolveApiMode(baseURL, provider?.apiMode);
+  const apiMode = resolveApiMode(baseURL, provider?.apiMode, model);
   const showThinking = settings.showThinking ?? false;
 
   return {

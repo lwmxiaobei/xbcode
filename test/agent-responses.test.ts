@@ -50,6 +50,8 @@ test("shouldPreserveChatReasoningContent keeps thinking payloads only for models
   assert.equal(shouldPreserveChatReasoningContent("mimo-v2.5-pro", true), true);
   assert.equal(shouldPreserveChatReasoningContent("gpt-5.4", true), false);
   assert.equal(shouldPreserveChatReasoningContent("mimo-v2.5-pro", false), false);
+  assert.equal(shouldPreserveChatReasoningContent("deepseek-v4-pro", true), true);
+  assert.equal(shouldPreserveChatReasoningContent("deepseek-v4-pro", false), true);
 });
 
 test("responses stream failure preserves interrupted turn for the next continue request", async () => {

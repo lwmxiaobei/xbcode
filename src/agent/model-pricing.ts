@@ -22,12 +22,17 @@ export type ModelPricing = {
 
 export type ModelInfo = {
   pricing: ModelPricing;
+  /** Provider billing currency for the pricing values. */
+  currency?: "USD" | "CNY";
   /** 上下文窗口大小（token），用于状态栏的占用百分比 */
   contextWindow: number;
+  /** 单次响应允许的最大输出 token 数。 */
+  maxOutputTokens?: number;
 };
 
 const DEFAULT_INFO: ModelInfo = {
   pricing: { input: 2.0, cachedInput: 0.5, output: 8.0 },
+  currency: "USD",
   contextWindow: 128_000,
 };
 
@@ -50,7 +55,20 @@ const MODEL_TABLE: Record<string, ModelInfo> = {
   "o3": { pricing: { input: 2.0, cachedInput: 0.5, output: 8.0 }, contextWindow: 200_000 },
   "o1-mini": { pricing: { input: 1.1, cachedInput: 0.55, output: 4.4 }, contextWindow: 128_000 },
   "o1": { pricing: { input: 15.0, cachedInput: 7.5, output: 60.0 }, contextWindow: 200_000 },
-  // DeepSeek（chat-completions 端，128k 窗口）
+  // DeepSeek V4 官方定价使用 CNY / 百万 token，窗口与输出上限来自模型规格表。
+  "deepseek-v4-flash": {
+    pricing: { input: 1.0, cachedInput: 0.02, output: 2.0 },
+    currency: "CNY",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
+  },
+  "deepseek-v4-pro": {
+    pricing: { input: 3.0, cachedInput: 0.025, output: 6.0 },
+    currency: "CNY",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 384_000,
+  },
+  // DeepSeek 旧模型（USD / 百万 token，128k 窗口）
   "deepseek-reasoner": { pricing: { input: 0.55, cachedInput: 0.14, output: 2.19 }, contextWindow: 128_000 },
   "deepseek-chat": { pricing: { input: 0.27, cachedInput: 0.07, output: 1.1 }, contextWindow: 128_000 },
 };
@@ -70,7 +88,15 @@ export function getContextWindow(model: string): number {
   return resolveModelInfo(model).contextWindow;
 }
 
-/** 按模型单价计算本次响应的费用（USD）。 */
+export function getMaxOutputTokens(model: string): number | undefined {
+  return resolveModelInfo(model).maxOutputTokens;
+}
+
+export function getPricingCurrency(model: string): "USD" | "CNY" {
+  return resolveModelInfo(model).currency ?? "USD";
+}
+
+/** 按模型原生计费币种计算本次响应费用。 */
 export function calculateCost(
   model: string,
   inputTokens: number,

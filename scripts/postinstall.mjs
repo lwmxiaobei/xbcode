@@ -19,6 +19,14 @@ const defaultSettings = {
       baseURL: "https://api.openai.com/v1",
       apiMode: "responses",
     },
+    deepseek: {
+      models: [
+        { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+      ],
+      apiKey: "",
+      baseURL: "https://api.deepseek.com",
+      apiMode: "responses",
+    },
     volcengine: {
       models: [
         { id: "doubao-seed-2.0-code", name: "Doubao Seed 2.0 Code" },

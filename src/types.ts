@@ -65,7 +65,11 @@ export type TokenUsage = {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
+  // Legacy USD total kept for backward-compatible session snapshots.
   cost: number;
+  // Native provider costs keyed by billing currency. New usage records use this
+  // map so CNY-priced DeepSeek calls are never mislabeled or summed as USD.
+  costs?: Partial<Record<"USD" | "CNY", number>>;
 };
 
 export type ToolApprovalDecision = "approved" | "rejected";

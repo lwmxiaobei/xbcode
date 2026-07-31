@@ -58,11 +58,11 @@ npm run dev
     },
     "deepseek": {
       "models": [
-        { "id": "deepseek-chat", "name": "DeepSeek Chat", "description": "DeepSeek V3 chat model" }
+        { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "description": "DeepSeek Responses API model" }
       ],
       "apiKey": "sk-xxxxx",
-      "baseURL": "https://api.deepseek.com/v1",
-      "apiMode": "chat-completions"
+      "baseURL": "https://api.deepseek.com",
+      "apiMode": "responses"
     },
     "longcat": {
       "models": [
@@ -140,11 +140,13 @@ npm start
 
 ### 网络搜索
 
-内置 `web_search` 工具使用 Brave Search API。需要在项目根目录 `.env` 或当前 shell 中配置：
+内置 `web_search` 工具使用火山引擎 Search Infinity 联网搜索。先在[火山引擎控制台](https://console.volcengine.com/search-infinity/api-key)创建独立的联网搜索 API Key，再在项目根目录 `.env` 或当前 shell 中配置：
 
 ```bash
-BRAVE_SEARCH_API_KEY=你的 Brave Search API Key
+ASK_ECHO_SEARCH_INFINITY_API_KEY=你的火山引擎联网搜索 API Key
 ```
+
+同时兼容 `VOLCENGINE_SEARCH_API_KEY` 和 `ARK_SEARCH_API_KEY` 两个环境变量名。联网搜索 API Key 与方舟模型 API Key 相互独立。未配置火山引擎搜索密钥时，已有的 `BRAVE_SEARCH_API_KEY` 仍可作为兼容回退。
 
 模型需要查找最新信息时会先调用 `web_search` 获取候选结果，再用 `web_fetch` 读取选中的页面内容。
 
@@ -237,7 +239,11 @@ OpenAI OAuth 配置示例：
 }
 ```
 
-如果不显式指定，程序也会根据 `baseURL` 做一部分自动判断，例如 DeepSeek、阿里云百炼兼容地址，以及火山方舟 Ark 兼容地址，都会默认切到 `chat-completions`。
+如果不显式指定，程序也会根据 `baseURL` 和模型做自动判断。DeepSeek 官方地址下的 `deepseek-v4-flash` 会使用 `responses`，其他 DeepSeek 模型、阿里云百炼兼容地址和火山方舟 Ark 兼容地址会使用 `chat-completions`。
+
+DeepSeek 官方 Responses API 是无状态接口，不支持 `previous_response_id`。`xbcode` 会在多轮对话和工具调用后自动重放本地 Responses 历史，因此不需要额外代理层。当前 DeepSeek 官方仅为 `deepseek-v4-flash` 开放 Responses API；使用尚未开放 Responses 的模型时，请继续配置 `chat-completions`。
+
+项目内置的 DeepSeek V4 模型元数据与官方规格一致：`deepseek-v4-flash` 和 `deepseek-v4-pro` 均使用 1M 上下文、最大 384K 输出。价格按人民币每百万 token 记录，Flash 的缓存命中输入、缓存未命中输入和输出分别为 0.02 元、1 元和 2 元，Pro 分别为 0.025 元、3 元和 6 元。状态栏会使用 `¥` 展示 DeepSeek 费用，不会与美元费用混算。
 
 对于火山方舟 Ark，请在 provider 里填写你的 Ark API Key，`baseURL` 使用 `https://ark.cn-beijing.volces.com/api/coding/v3`，`models` 则填写你可用的模型 ID。当前可直接配置的示例包括：`doubao-seed-2.0-code`、`doubao-seed-2.0-pro`、`doubao-seed-2.0-lite`、`doubao-seed-code`、`minimax-m2.7`、`minimax-m3`、`glm-5.1`、`deepseek-v4-flash`、`deepseek-v4-pro`、`kimi-k2.6`。
 

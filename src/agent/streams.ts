@@ -421,10 +421,12 @@ export async function streamChatCompletion(
         const delta = chunk.choices?.[0]?.delta as any;
         if (!delta) continue;
 
-        if (showThinking && delta.reasoning_content) {
+        if (delta.reasoning_content) {
           reasoningContent += delta.reasoning_content;
-          streamedToBridge = true;
-          bridge.appendThinkingDelta(delta.reasoning_content);
+          if (showThinking) {
+            streamedToBridge = true;
+            bridge.appendThinkingDelta(delta.reasoning_content);
+          }
         }
 
         if (delta.content) {
