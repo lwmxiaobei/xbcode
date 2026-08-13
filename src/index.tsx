@@ -85,6 +85,7 @@ function createAgentConfig(resolved: ResolvedConfig, authState?: ProviderAuthSta
   return {
     client,
     model: resolved.model,
+    baseURL: resolved.baseURL,
     // The headless sub-agent child re-resolves auth from persisted config given
     // these, so they must travel with the config the `subagent` tool spawns from.
     providerName: resolved.providerName,

@@ -264,13 +264,12 @@ export function resolveApiMode(
   }
   const lowerBaseURL = baseURL.toLowerCase();
   /**
-   * DeepSeek's official endpoint now exposes Responses API for
-   * `deepseek-v4-flash`, while its other models still need Chat Completions.
+   * DeepSeek's official endpoint exposes Responses API for both V4 models.
    * Keep the choice model-aware so selecting an unsupported DeepSeek model does
    * not silently route it to `/responses`.
    */
   if (lowerBaseURL.includes("deepseek.com")) {
-    return model?.trim().toLowerCase() === "deepseek-v4-flash"
+    return ["deepseek-v4-flash", "deepseek-v4-pro"].includes(model?.trim().toLowerCase() ?? "")
       ? "responses"
       : "chat-completions";
   }

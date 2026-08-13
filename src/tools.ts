@@ -1284,6 +1284,48 @@ export const TEAMMATE_TOOLS = [
   TEAM_MESSAGE_TOOL,
 ] as const;
 
+export const DEEPSEEK_SERVER_WEB_SEARCH_TOOL = {
+  type: "web_search",
+} as const;
+
+type ResponseToolProvider = {
+  apiMode: "responses" | "chat-completions";
+  baseURL?: string;
+};
+
+/**
+ * DeepSeek's official Responses API executes `web_search` on the server.
+ *
+ * Keep the replacement capability-aware and permission-preserving:
+ *
+ * 1. Only the official DeepSeek Responses endpoint gets the built-in tool.
+ * 2. Only replace an existing local `web_search` function, so callers that did
+ *    not grant search permission do not gain it accidentally.
+ * 3. Other providers and Chat Completions retain the current local search
+ *    implementation backed by Volcengine or Brave.
+ */
+export function prepareResponseToolsForProvider(
+  tools: readonly any[],
+  provider: ResponseToolProvider,
+): any[] {
+  const isOfficialDeepSeekResponses = provider.apiMode === "responses"
+    && (provider.baseURL ?? "").toLowerCase().includes("deepseek.com");
+  const hasLocalWebSearch = tools.some(
+    (tool) => tool?.type === "function" && tool?.name === "web_search",
+  );
+
+  if (!isOfficialDeepSeekResponses || !hasLocalWebSearch) {
+    return [...tools];
+  }
+
+  return [
+    ...tools.filter(
+      (tool) => !(tool?.type === "function" && tool?.name === "web_search"),
+    ),
+    DEEPSEEK_SERVER_WEB_SEARCH_TOOL,
+  ];
+}
+
 // Chat Completions API 需要另一种 tool 结构，这里把内部定义转换成兼容格式。
 function toChatTools<T extends readonly { name: string; description: string; parameters: unknown }[]>(tools: T) {
   return tools.map((tool) => ({

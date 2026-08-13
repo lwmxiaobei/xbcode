@@ -256,9 +256,11 @@ Key fields:
 - `auth`
   Optional provider auth mode. Today only `{ "type": "oauth" }` is supported, and only for OpenAI.
 
-API mode can be explicit or derived automatically from the base URL and model. The official DeepSeek endpoint uses `responses` automatically for `deepseek-v4-flash`; other DeepSeek models, DashScope-compatible endpoints, and Volcengine Ark-compatible endpoints default to `chat-completions`.
+API mode can be explicit or derived automatically from the base URL and model. The official DeepSeek endpoint uses `responses` automatically for `deepseek-v4-flash` and `deepseek-v4-pro`; legacy DeepSeek models, DashScope-compatible endpoints, and Volcengine Ark-compatible endpoints default to `chat-completions`.
 
-DeepSeek's official Responses API is stateless and does not support `previous_response_id`. `xbcode` automatically replays local Responses history across user turns and tool-call continuations, so no protocol proxy is required. DeepSeek currently exposes Responses API only for `deepseek-v4-flash`; keep models that have not enabled Responses on `chat-completions`.
+DeepSeek's official Responses API is stateless and does not support `previous_response_id`. `xbcode` automatically replays local Responses history across user turns and tool-call continuations, so no protocol proxy is required. Both `deepseek-v4-flash` and `deepseek-v4-pro` support Responses API.
+
+When the official DeepSeek endpoint runs in Responses mode, `xbcode` replaces its local `web_search` function with DeepSeek's server-side `web_search` tool. Search execution and result recovery happen on DeepSeek's servers, so Volcengine and Brave search keys are not required for this provider. Other providers and Chat Completions continue to use the local search function.
 
 The built-in DeepSeek V4 metadata matches the provider table: both `deepseek-v4-flash` and `deepseek-v4-pro` use a 1M context window and allow up to 384K output tokens. Native prices are stored in CNY per million tokens. Flash cached input, uncached input, and output cost ¥0.02, ¥1, and ¥2; Pro costs ¥0.025, ¥3, and ¥6. The status bar displays DeepSeek charges with `¥` and keeps them separate from USD charges.
 

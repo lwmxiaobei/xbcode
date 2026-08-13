@@ -9,7 +9,7 @@ import {
 } from "./compact.js";
 import { logApiError } from "./error-log.js";
 import { getDynamicMcpToolSurface } from "./mcp/runtime.js";
-import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, BASE_CHAT_TOOLS, TEAMMATE_TOOLS, TEAMMATE_CHAT_TOOLS, BASE_TOOL_HANDLERS, taskManager } from "./tools.js";
+import { messageBus, teammateManager, LEAD_NAME, TOOLS, CHAT_TOOLS, BASE_TOOLS, BASE_CHAT_TOOLS, TEAMMATE_TOOLS, TEAMMATE_CHAT_TOOLS, BASE_TOOL_HANDLERS, prepareResponseToolsForProvider, taskManager } from "./tools.js";
 import { formatTeammateMessages } from "./message-bus.js";
 import { createGoal, getGoal, updateGoalFromModel } from "./goal-manager.js";
 import { getSubagentDefinition } from "./subagents.js";
@@ -94,6 +94,7 @@ async function prepareToolRuntime(
   baseHandlers: ToolHandlerMap,
   baseResponseTools: readonly any[],
   baseChatTools: readonly any[],
+  provider: Pick<AgentConfig, "apiMode" | "baseURL">,
 ): Promise<PreparedToolRuntime> {
   const dynamicMcp = await getDynamicMcpToolSurface();
   return {
@@ -101,10 +102,10 @@ async function prepareToolRuntime(
       ...baseHandlers,
       ...dynamicMcp.handlers,
     },
-    responseTools: [
+    responseTools: prepareResponseToolsForProvider([
       ...baseResponseTools,
       ...dynamicMcp.responseTools,
-    ],
+    ], provider),
     chatTools: [
       ...baseChatTools,
       ...dynamicMcp.chatTools,
@@ -187,6 +188,7 @@ async function launchTeammateRuntime(config: AgentConfig, control: TeammateRunti
         buildTeammateHandlers(control.name),
         TEAMMATE_TOOLS,
         TEAMMATE_CHAT_TOOLS,
+        config,
       );
       await runTurn(
         config,
@@ -706,6 +708,7 @@ async function runTurn(
 export type AgentConfig = {
   client: OpenAI;
   model: string;
+  baseURL: string;
   // Provider + model identifiers needed by the headless sub-agent child to
   // re-resolve auth from persisted config in its own process.
   providerName: string;
@@ -729,6 +732,6 @@ export async function runAgentTurn(
   bridge: UiBridge,
   control?: RunControl,
 ): Promise<TurnResult> {
-  const runtime = await prepareToolRuntime(buildLeadHandlers(config, bridge, state), TOOLS, CHAT_TOOLS);
+  const runtime = await prepareToolRuntime(buildLeadHandlers(config, bridge, state), TOOLS, CHAT_TOOLS, config);
   return await runTurn(config, query, attachments, state, bridge, runtime.handlers, runtime.responseTools, runtime.chatTools, control);
 }

@@ -14,7 +14,7 @@ import {
 } from "./config.js";
 import { refreshAccessToken } from "./oauth/openai.js";
 import { getSubagentDefinition, type SubagentDefinition } from "./subagents.js";
-import { BASE_CHAT_TOOLS, BASE_TOOLS, BASE_TOOL_HANDLERS } from "./tools.js";
+import { BASE_CHAT_TOOLS, BASE_TOOLS, BASE_TOOL_HANDLERS, prepareResponseToolsForProvider } from "./tools.js";
 import {
   buildResponseContinuation,
   cloneResponseReplayItem,
@@ -88,8 +88,14 @@ function isReadOnlyShellCommand(command: string): boolean {
 }
 
 // 这里把“工具列表”和“工具执行函数”一起裁剪。
-function buildSubagentRuntime(definition: SubagentDefinition): PreparedToolRuntime {
-  const responseTools = selectToolsByName(BASE_TOOLS, definition.allowedTools);
+function buildSubagentRuntime(
+  definition: SubagentDefinition,
+  provider?: { apiMode: "responses" | "chat-completions"; baseURL: string },
+): PreparedToolRuntime {
+  const selectedResponseTools = selectToolsByName(BASE_TOOLS, definition.allowedTools);
+  const responseTools = provider
+    ? prepareResponseToolsForProvider(selectedResponseTools, provider)
+    : selectedResponseTools;
   const chatTools = selectToolsByName(BASE_CHAT_TOOLS, definition.allowedTools);
   const handlers: ToolHandlerMap = { ...BASE_TOOL_HANDLERS };
 
@@ -115,13 +121,14 @@ function buildSubagentRuntime(definition: SubagentDefinition): PreparedToolRunti
 async function subAgentLoopResponses(
   client: OpenAI,
   model: string,
+  baseURL: string,
   system: string,
   description: string,
   bridge: UiBridge,
   definition: SubagentDefinition,
   supportsPreviousResponseId: boolean,
 ): Promise<string> {
-  const runtime = buildSubagentRuntime(definition);
+  const runtime = buildSubagentRuntime(definition, { apiMode: "responses", baseURL });
   const replayHistory: ResponseInputItem[] = [
     { type: "message", role: "user", content: [{ type: "input_text", text: description }] },
   ];
@@ -390,6 +397,7 @@ export async function runSubagentHeadless(): Promise<number> {
       : await subAgentLoopResponses(
           client,
           resolved.model,
+          resolved.baseURL,
           subSystem,
           spec.description,
           bridge,

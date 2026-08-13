@@ -18,15 +18,20 @@ import { accumulateTokenUsage, extractTokenUsage } from "../src/agent/usage.js";
 import { streamChatCompletion } from "../src/agent/streams.js";
 import { resolveApiMode } from "../src/config.js";
 import { mcpManager } from "../src/mcp/runtime.js";
+import { prepareResponseToolsForProvider } from "../src/tools.js";
 import type { AgentState, UiBridge } from "../src/types.js";
 
-test("DeepSeek v4 Flash defaults to Responses while unsupported DeepSeek models stay on Chat Completions", () => {
+test("both DeepSeek V4 models default to Responses while legacy models stay on Chat Completions", () => {
   assert.equal(
     resolveApiMode("https://api.deepseek.com", undefined, "deepseek-v4-flash"),
     "responses",
   );
   assert.equal(
     resolveApiMode("https://api.deepseek.com/v1", undefined, "deepseek-v4-pro"),
+    "responses",
+  );
+  assert.equal(
+    resolveApiMode("https://api.deepseek.com", undefined, "deepseek-chat"),
     "chat-completions",
   );
   assert.equal(
@@ -37,6 +42,40 @@ test("DeepSeek v4 Flash defaults to Responses while unsupported DeepSeek models 
     resolveApiMode("https://api.deepseek.com", "responses", "deepseek-v4-pro"),
     "responses",
   );
+});
+
+test("official DeepSeek Responses replaces local web search with the server tool", () => {
+  const tools = [
+    { type: "function", name: "bash" },
+    { type: "function", name: "web_search" },
+  ];
+
+  assert.deepEqual(prepareResponseToolsForProvider(tools, {
+    apiMode: "responses",
+    baseURL: "https://api.deepseek.com",
+  }), [
+    { type: "function", name: "bash" },
+    { type: "web_search" },
+  ]);
+
+  assert.deepEqual(prepareResponseToolsForProvider(tools, {
+    apiMode: "chat-completions",
+    baseURL: "https://api.deepseek.com",
+  }), tools);
+
+  assert.deepEqual(prepareResponseToolsForProvider(tools, {
+    apiMode: "responses",
+    baseURL: "https://api.openai.com/v1",
+  }), tools);
+
+  assert.deepEqual(prepareResponseToolsForProvider([
+    { type: "function", name: "bash" },
+  ], {
+    apiMode: "responses",
+    baseURL: "https://api.deepseek.com",
+  }), [
+    { type: "function", name: "bash" },
+  ]);
 });
 
 test("official DeepSeek Responses endpoint is treated as stateless", () => {
@@ -273,6 +312,7 @@ test("DeepSeek stateless agent loop replays tool context and prior user turns", 
   const config = {
     client: client as any,
     model: "deepseek-v4-flash",
+    baseURL: "https://api.deepseek.com",
     providerName: "deepseek",
     modelName: "deepseek-v4-flash",
     system: "You are helpful.",
@@ -285,6 +325,8 @@ test("DeepSeek stateless agent loop replays tool context and prior user turns", 
   await runAgentTurn(config, "follow up question", [], state, bridge);
 
   assert.equal(requests.length, 3);
+  assert.ok(requests[0].tools.some((tool: any) => tool.type === "web_search"));
+  assert.ok(!requests[0].tools.some((tool: any) => tool.type === "function" && tool.name === "web_search"));
   assert.equal(requests[0].previous_response_id, undefined);
   assert.equal(requests[1].previous_response_id, undefined);
   assert.deepEqual(

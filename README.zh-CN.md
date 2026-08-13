@@ -239,9 +239,11 @@ OpenAI OAuth 配置示例：
 }
 ```
 
-如果不显式指定，程序也会根据 `baseURL` 和模型做自动判断。DeepSeek 官方地址下的 `deepseek-v4-flash` 会使用 `responses`，其他 DeepSeek 模型、阿里云百炼兼容地址和火山方舟 Ark 兼容地址会使用 `chat-completions`。
+如果不显式指定，程序也会根据 `baseURL` 和模型做自动判断。DeepSeek 官方地址下的 `deepseek-v4-flash` 和 `deepseek-v4-pro` 会使用 `responses`，DeepSeek 旧模型、阿里云百炼兼容地址和火山方舟 Ark 兼容地址会使用 `chat-completions`。
 
-DeepSeek 官方 Responses API 是无状态接口，不支持 `previous_response_id`。`xbcode` 会在多轮对话和工具调用后自动重放本地 Responses 历史，因此不需要额外代理层。当前 DeepSeek 官方仅为 `deepseek-v4-flash` 开放 Responses API；使用尚未开放 Responses 的模型时，请继续配置 `chat-completions`。
+DeepSeek 官方 Responses API 是无状态接口，不支持 `previous_response_id`。`xbcode` 会在多轮对话和工具调用后自动重放本地 Responses 历史，因此不需要额外代理层。`deepseek-v4-flash` 和 `deepseek-v4-pro` 均已支持 Responses API。
+
+当 DeepSeek 官方地址使用 Responses 模式时，`xbcode` 会把本地 `web_search` Function Tool 替换为 DeepSeek 服务端 `web_search` 工具。搜索执行和结果恢复由 DeepSeek 服务端完成，该 provider 不再需要火山引擎或 Brave 搜索 Key。其他 provider 和 Chat Completions 继续使用本地搜索工具。
 
 项目内置的 DeepSeek V4 模型元数据与官方规格一致：`deepseek-v4-flash` 和 `deepseek-v4-pro` 均使用 1M 上下文、最大 384K 输出。价格按人民币每百万 token 记录，Flash 的缓存命中输入、缓存未命中输入和输出分别为 0.02 元、1 元和 2 元，Pro 分别为 0.025 元、3 元和 6 元。状态栏会使用 `¥` 展示 DeepSeek 费用，不会与美元费用混算。
 
