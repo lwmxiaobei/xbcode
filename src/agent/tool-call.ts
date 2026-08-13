@@ -1,4 +1,4 @@
-import type { ResponseInputItem, UiBridge } from "../types.js";
+import type { ResponseInputItem, ToolResult, ToolResultDetails, UiBridge } from "../types.js";
 import { buildToolRejectionOutput, toolNeedsApproval } from "./tool-approval.js";
 import { invalidToolArguments, parseToolArgs, validateToolArgs } from "./tool-args.js";
 import { ASK_USER_QUESTION_TOOL_NAME, runAskUserQuestion } from "./user-choice.js";
@@ -8,7 +8,14 @@ export type ToolCallExecution = {
   name: string;
   args: Record<string, unknown>;
   output: string;
+  details?: ToolResultDetails;
 };
+
+// 工具可以只返回一个字符串，也可以返回 { output, details }。
+// 这里统一成后者，让调用方不必区分。
+function normalizeToolResult(result: string | ToolResult): ToolResult {
+  return typeof result === "string" ? { output: result } : result;
+}
 
 export async function executeToolCall(
   toolCall: any,
@@ -50,9 +57,9 @@ export async function executeToolCall(
   }
 
   const handler = handlers[name];
-  const output = handler ? await handler(args, control) : `Unknown tool: ${name}`;
-  bridge.pushTool(name, args, output);
-  return { name, args, output };
+  const result = normalizeToolResult(handler ? await handler(args, control) : `Unknown tool: ${name}`);
+  bridge.pushTool(name, args, result.output, result.details);
+  return { name, args, output: result.output, details: result.details };
 }
 
 export async function runToolCall(

@@ -28,6 +28,14 @@ export type ModelInfo = {
   contextWindow: number;
   /** 单次响应允许的最大输出 token 数。 */
   maxOutputTokens?: number;
+  /**
+   * 模型是否接受图片输入。
+   *
+   * 只在「确定不支持」时显式标 false：read_file 读到图片会据此改为只回文字说明，
+   * 避免把 base64 发给纯文本模型换来一个 API 报错。未知模型按支持处理，
+   * 因为漏发图片对多模态模型的损失，比偶尔一次 API 报错更难被发现。
+   */
+  supportsImages?: boolean;
 };
 
 const DEFAULT_INFO: ModelInfo = {
@@ -51,9 +59,17 @@ const MODEL_TABLE: Record<string, ModelInfo> = {
   "gpt-5": { pricing: { input: 1.25, cachedInput: 0.125, output: 10.0 }, contextWindow: 400_000 },
   // OpenAI o 系列推理模型（200k 窗口）
   "o4-mini": { pricing: { input: 1.1, cachedInput: 0.275, output: 4.4 }, contextWindow: 200_000 },
-  "o3-mini": { pricing: { input: 1.1, cachedInput: 0.55, output: 4.4 }, contextWindow: 200_000 },
+  "o3-mini": {
+    pricing: { input: 1.1, cachedInput: 0.55, output: 4.4 },
+    contextWindow: 200_000,
+    supportsImages: false,
+  },
   "o3": { pricing: { input: 2.0, cachedInput: 0.5, output: 8.0 }, contextWindow: 200_000 },
-  "o1-mini": { pricing: { input: 1.1, cachedInput: 0.55, output: 4.4 }, contextWindow: 128_000 },
+  "o1-mini": {
+    pricing: { input: 1.1, cachedInput: 0.55, output: 4.4 },
+    contextWindow: 128_000,
+    supportsImages: false,
+  },
   "o1": { pricing: { input: 15.0, cachedInput: 7.5, output: 60.0 }, contextWindow: 200_000 },
   // DeepSeek V4 官方定价使用 CNY / 百万 token，窗口与输出上限来自模型规格表。
   "deepseek-v4-flash": {
@@ -68,9 +84,17 @@ const MODEL_TABLE: Record<string, ModelInfo> = {
     contextWindow: 1_000_000,
     maxOutputTokens: 384_000,
   },
-  // DeepSeek 旧模型（USD / 百万 token，128k 窗口）
-  "deepseek-reasoner": { pricing: { input: 0.55, cachedInput: 0.14, output: 2.19 }, contextWindow: 128_000 },
-  "deepseek-chat": { pricing: { input: 0.27, cachedInput: 0.07, output: 1.1 }, contextWindow: 128_000 },
+  // DeepSeek 旧模型（USD / 百万 token，128k 窗口）。这两个是纯文本模型。
+  "deepseek-reasoner": {
+    pricing: { input: 0.55, cachedInput: 0.14, output: 2.19 },
+    contextWindow: 128_000,
+    supportsImages: false,
+  },
+  "deepseek-chat": {
+    pricing: { input: 0.27, cachedInput: 0.07, output: 1.1 },
+    contextWindow: 128_000,
+    supportsImages: false,
+  },
 };
 
 // 预先按前缀长度降序排好，匹配时第一个命中的就是最具体的。
@@ -94,6 +118,11 @@ export function getMaxOutputTokens(model: string): number | undefined {
 
 export function getPricingCurrency(model: string): "USD" | "CNY" {
   return resolveModelInfo(model).currency ?? "USD";
+}
+
+/** 模型是否接受图片输入。表里没有显式标 false 的一律按支持处理。 */
+export function modelSupportsImages(model: string): boolean {
+  return resolveModelInfo(model).supportsImages !== false;
 }
 
 /** 按模型原生计费币种计算本次响应费用。 */

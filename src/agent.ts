@@ -36,6 +36,13 @@ const NAG_MESSAGE = "<reminder>Update your tasks with task_list or task_update.<
 
 const RESPONSES_COMPACT_INTERVAL = 20;
 
+// 图片作为独立 user 消息发出时的说明文字。让模型知道这些图来自它自己的 read_file，
+// 而不是用户临时贴上来的。
+function describeReadImages(images: ImageAttachment[]): string {
+  const paths = images.map((image) => image.path).join(", ");
+  return `Image${images.length > 1 ? "s" : ""} attached from read_file: ${paths}`;
+}
+
 function createSilentBridge(): UiBridge {
   return {
     appendAssistantDelta() {},
@@ -433,6 +440,13 @@ async function agentLoop(
       }
     }
 
+    // read_file 读到的图片进不了 function_call_output（那里只收纯文本），
+    // 所以在工具结果之后补一条 user message 把图片真正发出去。
+    const pendingImages = control?.pendingImages?.splice(0) ?? [];
+    if (pendingImages.length > 0) {
+      results.push(buildUserResponseMessage(describeReadImages(pendingImages), pendingImages));
+    }
+
     replayHistory.push(...results.map((item) => cloneResponseReplayItem(item)));
 
     const continuation = buildResponseContinuation(
@@ -530,6 +544,15 @@ async function agentLoopWithChatCompletions(
       throwIfAborted(control?.signal);
     }
 
+    // 同 Responses 分支：tool 消息不收图片，图片单独走一条 user 消息。
+    const pendingImages = control?.pendingImages?.splice(0) ?? [];
+    if (pendingImages.length > 0) {
+      history.push({
+        role: "user",
+        content: buildChatUserMessageContent(describeReadImages(pendingImages), pendingImages),
+      });
+    }
+
     if (state.roundsSinceTask >= NAG_THRESHOLD && await taskManager.hasActiveTasks()) {
       history.push({
         role: "user",
@@ -556,6 +579,10 @@ async function runTurn(
   const { apiMode } = config;
   state.turnCount += 1;
   state.roundsSinceTask = 0;
+
+  // 每轮新建工具侧的 control：保留外部传入的 signal，另外挂上当前模型和
+  // 本轮的待发图片队列。队列随轮次创建，主循环、子代理、队友之间互不串台。
+  const toolControl: RunControl = { ...control, model: config.model, pendingImages: [] };
 
   // 单轮用量：用于 goal 预算结算等"按轮"的统计，随每轮新建归零。
   const turnUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cost: 0 };
@@ -603,7 +630,7 @@ async function runTurn(
 
     state.chatHistory.push({ role: "user", content: buildChatUserMessageContent(query, attachments) });
     try {
-      await agentLoopWithChatCompletions(config, state.chatHistory, bridge, state, handlers, chatTools, control, onUsage, caller);
+      await agentLoopWithChatCompletions(config, state.chatHistory, bridge, state, handlers, chatTools, toolControl, onUsage, caller);
     } catch (error) {
       if (error instanceof TurnInterruptedError) {
         repairInterruptedToolCallHistory(state.chatHistory);
@@ -661,7 +688,7 @@ async function runTurn(
       state,
       handlers,
       responseTools,
-      control,
+      toolControl,
       onUsage,
       caller,
     );

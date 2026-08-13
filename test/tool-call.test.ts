@@ -118,7 +118,7 @@ test("runToolCall rejects missing arguments for side-effect tools before approva
     {
       name: "edit_file",
       arguments: "{\"path\":\"a.txt\",\"new_text\":\"patched\"}",
-      expected: /^Error: Invalid arguments for edit_file: old_text must be a non-empty string/,
+      expected: /^Error: Invalid arguments for edit_file: at least one of edits, old_text is required/,
     },
     {
       name: "task_create",

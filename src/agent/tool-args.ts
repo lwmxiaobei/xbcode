@@ -27,12 +27,15 @@ const SIDE_EFFECT_TOOL_ARGS: Record<string, ToolArgsSpec> = {
       content: { type: "string", required: true },
     },
   },
+  // edits 有三种合法形态（数组、JSON 字符串、旧的顶层 old_text/new_text），
+  // 类型校验交给 normalizeEditArgs，这里只保证 path 存在、且至少给了一种形态。
   edit_file: {
     fields: {
       path: { type: "string", required: true, nonEmpty: true },
-      old_text: { type: "string", required: true, nonEmpty: true },
-      new_text: { type: "string", required: true },
+      old_text: { type: "string", nonEmpty: true },
+      new_text: { type: "string" },
     },
+    requireAny: ["edits", "old_text"],
   },
   task_create: {
     fields: {

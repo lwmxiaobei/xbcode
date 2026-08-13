@@ -70,7 +70,7 @@ import { appendSessionCheckpoint, createSessionId, listRecentSessions, loadSessi
 import { isTrusted, markTrusted } from "./trust-store.js";
 import { skillLoader, messageBus, taskManager, teammateManager } from "./tools.js";
 import { formatBusyStatus } from "./busy-status.js";
-import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, ToolApprovalDecision, ToolArgs, TokenUsage, UiBridge, UiMessage, UserChoiceQuestion } from "./types.js";
+import type { AgentState, DiffLine, ImageAttachment, PersistedUiMessage, ToolApprovalDecision, ToolArgs, ToolResultDetails, TokenUsage, UiBridge, UiMessage, UserChoiceQuestion } from "./types.js";
 import { fetchOpenAIUsage, formatUsageReport, UsageRequestError } from "./usage.js";
 import { ellipsize } from "./utils.js";
 
@@ -319,10 +319,47 @@ type ToolDisplay = {
   lines: { text: string; color: string; prefix?: string }[];
 };
 
+/**
+ * 用 edit_file 自己算出来的 diff 渲染。
+ *
+ * 为什么优先走这条：从 args 反推改动位置需要在编辑后的文件里搜 new_text，
+ * 一旦是多处编辑、模糊匹配命中、或 CRLF 文件，搜出来的位置就是错的。
+ * 工具在写盘那一刻已经有准确的新旧内容，diff 由它给出才可靠。
+ */
+function formatEditFileDiffFromDetails(filePath: string, diff: string): ToolDisplay {
+  const lines: ToolDisplay["lines"] = [];
+  let added = 0;
+  let removed = 0;
+
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+")) {
+      added += 1;
+      lines.push({ text: line, color: "green" });
+    } else if (line.startsWith("-")) {
+      removed += 1;
+      lines.push({ text: line, color: "red" });
+    } else {
+      lines.push({ text: line, color: "gray" });
+    }
+  }
+
+  const parts: string[] = [];
+  if (added > 0) parts.push(`Added ${added} line${added > 1 ? "s" : ""}`);
+  if (removed > 0) parts.push(`removed ${removed} line${removed > 1 ? "s" : ""}`);
+
+  return {
+    title: `Update(${filePath})`,
+    subtitle: parts.length > 0 ? parts.join(", ") : undefined,
+    lines,
+  };
+}
+
+// 兜底路径：details 缺失时（例如回放旧会话）仍按老办法从 args 反推。
 function formatEditFileDiff(args: Record<string, unknown>): ToolDisplay {
   const filePath = String(args.path ?? "");
-  const oldText = String(args.old_text ?? "");
-  const newText = String(args.new_text ?? "");
+  const firstEdit = Array.isArray(args.edits) ? (args.edits[0] as Record<string, unknown> | undefined) : undefined;
+  const oldText = String(firstEdit?.old_text ?? args.old_text ?? "");
+  const newText = String(firstEdit?.new_text ?? args.new_text ?? "");
 
   const oldLines = oldText.split("\n");
   const newLines = newText.split("\n");
@@ -429,7 +466,12 @@ function formatBash(args: Record<string, unknown>, result: string): ToolDisplay 
   };
 }
 
-function formatToolDisplay(name: string, args: Record<string, unknown>, result: string): ToolDisplay | null {
+function formatToolDisplay(
+  name: string,
+  args: Record<string, unknown>,
+  result: string,
+  details?: ToolResultDetails,
+): ToolDisplay | null {
   // A rejected call did not run, so skip the rich diff/command view (which would
   // otherwise look as if it had been applied) and fall back to plain text.
   if (result.startsWith("Rejected by user:")) {
@@ -437,7 +479,10 @@ function formatToolDisplay(name: string, args: Record<string, unknown>, result: 
   }
   switch (name) {
     case "edit_file":
-      return result.startsWith("Error") ? null : formatEditFileDiff(args);
+      if (result.startsWith("Error")) return null;
+      return details?.diff
+        ? formatEditFileDiffFromDetails(String(args.path ?? ""), details.diff)
+        : formatEditFileDiff(args);
     case "write_file":
       return result.startsWith("Error") ? null : formatWriteFile(args, result);
     case "bash":
@@ -449,6 +494,39 @@ function formatToolDisplay(name: string, args: Record<string, unknown>, result: 
 
 // One-line-per-entry summary of what a tool call will do, shown in the approval
 // prompt so the user can decide without inspecting raw JSON args.
+/**
+ * 审批弹窗里的 edit_file 摘要。
+ *
+ * 一次调用可能带多处替换，只显示文件名的话用户无从判断该不该批准，
+ * 所以每处都给一行 `old → new` 的首行预览。
+ */
+function summarizeEditApproval(args: Record<string, unknown>): string[] {
+  const filePath = String(args.path ?? "");
+  const rawEdits = Array.isArray(args.edits) ? args.edits : [];
+  const edits = rawEdits.length > 0
+    ? rawEdits
+    : typeof args.old_text === "string"
+      ? [{ old_text: args.old_text, new_text: args.new_text }]
+      : [];
+
+  if (edits.length === 0) {
+    return [`edit → ${filePath}`];
+  }
+
+  const firstLine = (value: unknown): string => ellipsize(String(value ?? "").split("\n")[0]?.trim() ?? "", 40);
+
+  const lines = [`edit → ${filePath} (${edits.length} replacement${edits.length > 1 ? "s" : ""})`];
+  const MAX_PREVIEW = 5;
+  for (const edit of edits.slice(0, MAX_PREVIEW)) {
+    const entry = (edit ?? {}) as Record<string, unknown>;
+    lines.push(`  ${firstLine(entry.old_text ?? entry.oldText)} → ${firstLine(entry.new_text ?? entry.newText)}`);
+  }
+  if (edits.length > MAX_PREVIEW) {
+    lines.push(`  ... and ${edits.length - MAX_PREVIEW} more`);
+  }
+  return lines;
+}
+
 function summarizeApprovalTarget(name: string, args: Record<string, unknown>): string[] {
   switch (name) {
     case "bash":
@@ -456,7 +534,7 @@ function summarizeApprovalTarget(name: string, args: Record<string, unknown>): s
     case "write_file":
       return [`write → ${String(args.path ?? "")}`];
     case "edit_file":
-      return [`edit → ${String(args.path ?? "")}`];
+      return summarizeEditApproval(args);
     default:
       return [toolPreview(JSON.stringify(args))];
   }
@@ -1516,13 +1594,13 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
     pushAssistant(text) {
       pushMessage("assistant", text);
     },
-    pushTool(name, args, result) {
+    pushTool(name, args, result, details) {
       // tool 完成本身也算"活动"——否则一个 60s 的 bash 跑完时，
       // 距离上次 stream event 已经过去 60s，UI 会显示 "idle 60s" 让用户误判为卡死。
       // 这里把 tool 完成时间点也喂给心跳，配合 stream 事件就能覆盖大多数正常路径。
       lastActivityAtRef.current = Date.now();
       finalizeStreaming();
-      const display = formatToolDisplay(name, args, result);
+      const display = formatToolDisplay(name, args, result, details);
       if (display) {
         messageCounterRef.current += 1;
         const id = `message-${messageCounterRef.current}`;

@@ -8,6 +8,26 @@ export type ImageAttachment = {
   base64Data: string;
 };
 
+/**
+ * 工具执行的结构化附加结果。
+ *
+ * 模型只看 `output` 那段文本；这里的内容是给 UI 用的，不进对话上下文。
+ */
+export type ToolResultDetails = {
+  /** 展示用 diff：带行号、只保留改动附近的上下文 */
+  diff?: string;
+  /** 标准 unified patch，可直接 `git apply` */
+  patch?: string;
+  /** 新文件里第一处改动的行号 */
+  firstChangedLine?: number;
+};
+
+/** 工具执行结果。返回裸字符串时等价于 `{ output }`。 */
+export type ToolResult = {
+  output: string;
+  details?: ToolResultDetails;
+};
+
 export type GoalStatus = "active" | "paused" | "blocked" | "budget_limited" | "complete";
 
 export type GoalState = {
@@ -93,7 +113,10 @@ export type UiBridge = {
   appendThinkingDelta(delta: string): void;
   finalizeStreaming(): void;
   pushAssistant(text: string): void;
-  pushTool(name: string, args: ToolArgs, result: string): void;
+  // `details` 携带工具自己算出的结构化结果（目前是 edit_file 的 diff/patch）。
+  // 让工具把 diff 交出来，UI 就不必再从 args 反推改动位置 —— 反推在多处编辑、
+  // 模糊匹配、CRLF 文件上都会算错。
+  pushTool(name: string, args: ToolArgs, result: string, details?: ToolResultDetails): void;
   updateUsage(usage: TokenUsage): void;
   // Stream heartbeat: the agent loop calls this every time the SDK yields ANY
   // stream event — including reasoning chunks we choose not to render. The UI

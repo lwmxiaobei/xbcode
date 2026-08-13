@@ -37,13 +37,32 @@ test("write_file rejects a missing content field", () => {
   }
 });
 
-test("write_file allows an empty content string", () => {
+test("write_file allows an empty content string", async () => {
   const target = path.join(TMP_ROOT, "empty.md");
   try {
-    const result = BASE_TOOL_HANDLERS.write_file({ path: target, content: "" });
+    // 写操作现在经过 file mutation queue，因此是异步的。
+    const result = await BASE_TOOL_HANDLERS.write_file({ path: target, content: "" });
 
     assert.match(String(result), /^Wrote 0 bytes to /);
     assert.equal(fs.readFileSync(target, "utf8"), "");
+  } finally {
+    cleanup();
+  }
+});
+
+test("write_file serializes concurrent writes to the same file", async () => {
+  const target = path.join(TMP_ROOT, "concurrent.txt");
+  try {
+    // 并发写同一个文件：队列保证它们逐个落盘，最终内容是某一次的完整结果，
+    // 而不是两次写交错出来的半截内容。
+    const writes = ["a".repeat(2000), "b".repeat(2000), "c".repeat(2000)].map((content) =>
+      BASE_TOOL_HANDLERS.write_file({ path: target, content }),
+    );
+    await Promise.all(writes);
+
+    const finalContent = fs.readFileSync(target, "utf8");
+    assert.equal(finalContent.length, 2000);
+    assert.equal(new Set(finalContent).size, 1);
   } finally {
     cleanup();
   }

@@ -11,8 +11,14 @@ import { TaskManager } from "./task-manager.js";
 import { SkillLoader } from "./skills/index.js";
 import { handleListMcpResources, handleMcpCall, handleReadMcpResource } from "./mcp/runtime.js";
 import { describeSubagentsForHumans } from "./subagents.js";
-import type { ToolArgs } from "./types.js";
-import { validateToolArgs } from "./agent/tool-args.js";
+import type { ToolArgs, ToolResult } from "./types.js";
+import { invalidToolArguments, validateToolArgs } from "./agent/tool-args.js";
+import type { RunControl } from "./agent/runtime-types.js";
+import { normalizeEditArgs, runEdit, runRead, runWrite } from "./tools/file-tools.js";
+import {
+  DEFAULT_MAX_BYTES as FILE_READ_MAX_BYTES,
+  DEFAULT_MAX_LINES as FILE_READ_MAX_LINES,
+} from "./tools/file-truncate.js";
 
 const execAsync = promisify(exec);
 // execFile 不走 shell，把参数以数组形式传给进程，正则 pattern 里的特殊字符不会被 shell 二次解析。
@@ -183,97 +189,12 @@ async function runBash(command: string, signal?: AbortSignal): Promise<string> {
   }
 }
 
-// 下面三个文件工具是最基础的本地文件读写能力。
-function runRead(filePath: string, limit?: number): string {
-  try {
-    const text = fs.readFileSync(resolveToolPath(filePath), "utf8");
-    let lines = text.split(/\r?\n/);
-    if (limit && limit < lines.length) {
-      lines = [...lines.slice(0, limit), `... (${lines.length - limit} more lines)`];
-    }
-    return truncateToolOutput(lines.join("\n"));
-  } catch (error) {
-    return `Error: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
-
-function runWrite(filePath: string, content: string): string {
-  try {
-    const fullPath = resolveToolPath(filePath);
-    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-    fs.writeFileSync(fullPath, content, "utf8");
-    return `Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${filePath}`;
-  } catch (error) {
-    return `Error: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
-
-// 弯引号 / 直引号互转。
-//
-// 模型看不到弯引号会输出直引号，但很多文档（README、注释、字符串字面量）里
-// 真实存在的是弯引号；反之亦然。空白模糊匹配会改变代码语义（Python/YAML），
-// 这里只对引号这种「无歧义可逆」的字符做归一化。
-const LEFT_SINGLE_CURLY_QUOTE = "‘";
-const RIGHT_SINGLE_CURLY_QUOTE = "’";
-const LEFT_DOUBLE_CURLY_QUOTE = "“";
-const RIGHT_DOUBLE_CURLY_QUOTE = "”";
-
-export function normalizeQuotes(input: string): string {
-  return input
-    .replaceAll(LEFT_SINGLE_CURLY_QUOTE, "'")
-    .replaceAll(RIGHT_SINGLE_CURLY_QUOTE, "'")
-    .replaceAll(LEFT_DOUBLE_CURLY_QUOTE, '"')
-    .replaceAll(RIGHT_DOUBLE_CURLY_QUOTE, '"');
-}
-
-// 给定文件内容和模型给的 oldText，返回真正能用于替换的、来自文件的实际子串。
-// 失败则返回 null。命中规则只有两条：精确匹配 → 引号归一化匹配。
-export function findActualOldText(content: string, oldText: string): string | null {
-  if (content.includes(oldText)) return oldText;
-  const normalizedContent = normalizeQuotes(content);
-  const normalizedOld = normalizeQuotes(oldText);
-  const idx = normalizedContent.indexOf(normalizedOld);
-  if (idx === -1) return null;
-  // 归一化是字符级一一替换，长度不变，所以可以按相同偏移和长度从原文中切片。
-  return content.substring(idx, idx + oldText.length);
-}
-
-// 去掉每行末尾的水平空白，但保留行尾的 \r? \n。
-// markdown 的双空格行尾 = 硬换行，剥掉会改变渲染结果，因此 .md/.mdx 文件不调用这个函数。
-export function stripTrailingWhitespacePerLine(input: string): string {
-  return input.replace(/[ \t]+(\r?\n|$)/g, "$1");
-}
-
-function isMarkdownFile(filePath: string): boolean {
-  return /\.(md|mdx)$/i.test(filePath);
-}
-
-function runEdit(filePath: string, oldText: string, newText: string): string {
-  try {
-    const fullPath = resolveToolPath(filePath);
-    const content = fs.readFileSync(fullPath, "utf8");
-
-    const actualOldText = findActualOldText(content, oldText);
-    if (actualOldText === null) {
-      return `Error: String not found in ${filePath}. Read the file again to confirm exact content.`;
-    }
-
-    const normalizedNewText = isMarkdownFile(filePath)
-      ? newText
-      : stripTrailingWhitespacePerLine(newText);
-
-    // 用回调形式的 replace 避免 $&、$1 等替换序列被解释成捕获组。
-    const updated = content.replace(actualOldText, () => normalizedNewText);
-    if (updated === content) {
-      return `Error: Edit produced no changes in ${filePath}. old_text and new_text appear to match the same content.`;
-    }
-
-    fs.writeFileSync(fullPath, updated, "utf8");
-    return `Edited ${filePath}`;
-  } catch (error) {
-    return `Error: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
+// 文件工具的实现在 src/tools/ 下：
+// - file-tools.ts   三个工具的主体逻辑与可替换的文件系统操作
+// - edit-diff.ts    匹配、唯一性/重叠校验、diff 生成
+// - file-truncate.ts 行数/字节双上限截断
+// - file-mutation-queue.ts 同文件写操作串行化
+// 这里只保留「工具名 -> 实现」的接线。
 
 // --- web_fetch ---------------------------------------------------------------
 // MVP 版：拉取 URL -> 粗糙把 HTML 脱成文本 -> 按字符数截断。
@@ -826,12 +747,14 @@ export const BASE_TOOLS = [
   {
     type: "function",
     name: "read_file",
-    description: "Read file contents.",
+    description:
+      `Read file contents. Supports text files and images (jpeg, png, gif, webp); images are attached to the conversation. Text output is capped at ${FILE_READ_MAX_LINES} lines or ${FILE_READ_MAX_BYTES / 1024}KB, whichever comes first. Use offset/limit for large files — when the output is truncated it tells you the exact offset to pass next. Prefer this over 'bash cat/head/sed'.`,
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
-        limit: { type: "integer" },
+        path: { type: "string", description: "File path. Relative paths resolve from the current working directory." },
+        offset: { type: "integer", description: "Line number to start reading from (1-indexed). Omit to start at the top." },
+        limit: { type: "integer", description: "Maximum number of lines to read." },
       },
       required: ["path"],
       additionalProperties: false,
@@ -840,7 +763,8 @@ export const BASE_TOOLS = [
   {
     type: "function",
     name: "write_file",
-    description: "Write content to file.",
+    description:
+      "Write content to a file, creating parent directories as needed. Overwrites the whole file, so use it only for new files or complete rewrites — use edit_file to change part of an existing file.",
     parameters: {
       type: "object",
       properties: {
@@ -854,15 +778,27 @@ export const BASE_TOOLS = [
   {
     type: "function",
     name: "edit_file",
-    description: "Replace exact text in file.",
+    description:
+      "Edit one file through exact text replacement. Every old_text must match exactly one place in the file and must not overlap another edit in the same call — if it appears more than once the call fails, so include enough surrounding context to make it unique. Every old_text is matched against the original file, not against the result of earlier edits in the same call. To change several places in one file, send them as multiple entries in edits[] rather than several edit_file calls.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string" },
-        old_text: { type: "string" },
-        new_text: { type: "string" },
+        edits: {
+          type: "array",
+          description: "One or more replacements applied atomically: if any of them fails, the file is left untouched.",
+          items: {
+            type: "object",
+            properties: {
+              old_text: { type: "string", description: "Exact text to replace. Must be unique within the file." },
+              new_text: { type: "string", description: "Replacement text." },
+            },
+            required: ["old_text", "new_text"],
+            additionalProperties: false,
+          },
+        },
       },
-      required: ["path", "old_text", "new_text"],
+      required: ["path", "edits"],
       additionalProperties: false,
     },
   },
@@ -1366,22 +1302,39 @@ export const BASE_CHAT_TOOLS = toChatTools(BASE_TOOLS);
 
 // 这里是“工具名 -> 实际执行函数”的路由表。
 // `mcp_call` 在这一层接入到 MCP runtime，由后者继续完成初始化、校验和分发。
-export const BASE_TOOL_HANDLERS: Record<string, (args: ToolArgs, control?: { signal?: AbortSignal }) => Promise<string> | string> = {
+export const BASE_TOOL_HANDLERS: Record<
+  string,
+  (args: ToolArgs, control?: RunControl) => Promise<string | ToolResult> | string | ToolResult
+> = {
   bash: (args, control) => {
     const validationError = validateToolArgs("bash", args);
     if (validationError) return validationError;
     return runBash(args.command as string, control?.signal);
   },
-  read_file: ({ path: filePath, limit }) => runRead(String(filePath), toOptionalNumber(limit)),
+  read_file: ({ path: filePath, offset, limit }, control) =>
+    runRead(
+      String(filePath),
+      { offset: toOptionalNumber(offset), limit: toOptionalNumber(limit) },
+      control,
+      WORKDIR,
+    ),
   write_file: (args) => {
     const validationError = validateToolArgs("write_file", args);
     if (validationError) return validationError;
-    return runWrite(args.path as string, args.content as string);
+    return runWrite(args.path as string, args.content as string, WORKDIR);
   },
   edit_file: (args) => {
     const validationError = validateToolArgs("edit_file", args);
     if (validationError) return validationError;
-    return runEdit(args.path as string, args.old_text as string, args.new_text as string);
+
+    const edits = normalizeEditArgs(args);
+    if (!edits) {
+      return invalidToolArguments(
+        "edit_file",
+        "edits must be a non-empty array of { old_text, new_text } string pairs",
+      );
+    }
+    return runEdit(args.path as string, edits, WORKDIR);
   },
   glob: ({ pattern, path: p }, control) => runGlob(String(pattern), toOptionalString(p), control?.signal),
   grep: (args, control) => runGrep(args, control?.signal),
