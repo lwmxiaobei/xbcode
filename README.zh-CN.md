@@ -101,11 +101,14 @@ npm run dev
   "defaultProvider": "volcengine",
   "defaultModel": "doubao-seed-2.0-code",
   "showThinking": false,
+  "reasoningEffort": "medium",
   "mcp": {
     "servers": []
   }
 }
 ```
+
+`reasoningEffort` 为可选字段，用于给推理模型指定思考强度（`minimal` / `low` / `medium` / `high` / `xhigh` / `max`），分别映射到 Responses API 的 `reasoning.effort` 和 Chat Completions API 的 `reasoning_effort`。DeepSeek 会把 `medium`/`xhigh` 映射为 `high`，`max` 为最高强度。环境变量 `REASONING_EFFORT` 会覆盖该配置。
 
 ### 启动
 

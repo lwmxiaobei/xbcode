@@ -2,6 +2,9 @@ export type ToolArgs = Record<string, unknown>;
 export type ResponseInputItem = Record<string, unknown>;
 export type ChatMessage = Record<string, unknown>;
 
+/** 推理模型的思考强度，对应 OpenAI / DeepSeek 的 `reasoning.effort` 与 `reasoning_effort`。 */
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export type ImageAttachment = {
   path: string;
   mimeType: string;

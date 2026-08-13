@@ -4,7 +4,7 @@ import { logApiError, wrapApiError } from "../error-log.js";
 import { isTransientNetworkError } from "../http.js";
 import { combineAbortSignals, createIdleWatchdog, getStreamIdleTimeoutMs } from "../idle-watchdog.js";
 import { CHAT_TOOLS, TOOLS } from "../tools.js";
-import type { ChatMessage, ResponseInputItem, TokenUsage, UiBridge } from "../types.js";
+import type { ChatMessage, ReasoningEffort, ResponseInputItem, TokenUsage, UiBridge } from "../types.js";
 import { ResponseStreamError, TurnInterruptedError, throwIfAborted } from "./interrupt.js";
 import { cloneResponseReplayItem, extractAssistantTextFromResponseOutput, getMissingAssistantText, getResponseContentKey, normalizeResponseInput } from "./messages.js";
 import type { RunControl } from "./runtime-types.js";
@@ -29,6 +29,7 @@ export async function streamResponse(
   control?: RunControl,
   onUsage?: (usage: TokenUsage) => void,
   caller: string = "main",
+  reasoningEffort?: ReasoningEffort,
 ): Promise<any> {
   throwIfAborted(control?.signal);
   const normalizedInstructions = system.trim() || "You are a helpful coding assistant.";
@@ -57,6 +58,7 @@ export async function streamResponse(
     store: false,
     previous_response_id: previousResponseId,
     tools: tools as any,
+    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } as any } : {}),
   }, requestSignal ? { signal: requestSignal } : undefined);
   // 请求发出后立刻 arm watchdog。第一个字节最久允许 idleTimeoutMs 出现，
   // 这样"建立 TCP 但服务端完全不发数据"的情况也能被兜住。
@@ -332,6 +334,7 @@ export async function streamChatCompletion(
   control?: RunControl,
   onUsage?: (usage: TokenUsage) => void,
   caller: string = "main",
+  reasoningEffort?: ReasoningEffort,
 ): Promise<{ content: string | null; tool_calls: any[]; reasoning_content?: string }> {
   throwIfAborted(control?.signal);
 
@@ -345,6 +348,9 @@ export async function streamChatCompletion(
   };
   if (showThinking) {
     createParams.thinking = { type: "enabled" };
+  }
+  if (reasoningEffort) {
+    createParams.reasoning_effort = reasoningEffort;
   }
 
   const idleTimeoutMs = getStreamIdleTimeoutMs();

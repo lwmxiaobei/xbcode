@@ -8,6 +8,7 @@ import {
   clearProviderCredentials,
   loadCredentialsFile,
   needsModelSelection,
+  normalizeReasoningEffort,
   normalizeSettings,
   resolveProviderAuthState,
   resolveRuntimeAuth,
@@ -138,6 +139,31 @@ test("updateProviderModels persists discovered model ids for one provider", asyn
   assert.deepEqual(saved.providers.other.models, ["keep-me"]);
   assert.equal(saved.defaultProvider, "openai");
   assert.equal(saved.defaultModel, "gpt-5");
+});
+
+test("normalizeReasoningEffort accepts supported values and normalizes case/whitespace", () => {
+  assert.equal(normalizeReasoningEffort("low"), "low");
+  assert.equal(normalizeReasoningEffort("HIGH"), "high");
+  assert.equal(normalizeReasoningEffort(" minimal "), "minimal");
+  assert.equal(normalizeReasoningEffort("xhigh"), "xhigh");
+  assert.equal(normalizeReasoningEffort("max"), "max");
+  assert.equal(normalizeReasoningEffort("none"), undefined);
+  assert.equal(normalizeReasoningEffort("ultra"), undefined);
+  assert.equal(normalizeReasoningEffort(undefined), undefined);
+  assert.equal(normalizeReasoningEffort(3), undefined);
+});
+
+test("normalizeSettings keeps valid reasoningEffort and warns on invalid values", () => {
+  const warnings: string[] = [];
+  const settings = normalizeSettings({ providers: {}, reasoningEffort: "high" }, warnings);
+  assert.equal(settings.reasoningEffort, "high");
+  assert.equal(warnings.length, 0);
+
+  const invalidWarnings: string[] = [];
+  const invalid = normalizeSettings({ providers: {}, reasoningEffort: "ultra" }, invalidWarnings);
+  assert.equal(invalid.reasoningEffort, undefined);
+  assert.equal(invalidWarnings.length, 1);
+  assert.match(invalidWarnings[0] ?? "", /reasoningEffort/);
 });
 
 test("normalizeSettings keeps defaultModel when provided", () => {

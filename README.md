@@ -72,6 +72,7 @@ Minimal example:
   "defaultProvider": "volcengine",
   "defaultModel": "doubao-seed-2.0-code",
   "showThinking": false,
+  "reasoningEffort": "medium",
   "mcp": {
     "servers": []
   }
@@ -251,6 +252,8 @@ Key fields:
   Used when no provider is explicitly selected
 - `showThinking`
   Enables display of model reasoning deltas when supported
+- `reasoningEffort`
+  Optional thinking-intensity hint for reasoning models (`minimal`, `low`, `medium`, `high`, `xhigh`, or `max`). Maps to `reasoning.effort` (Responses) or `reasoning_effort` (Chat Completions). DeepSeek maps `medium`/`xhigh` to `high` and treats `max` as its strongest level. The `REASONING_EFFORT` environment variable overrides this value.
 - `apiMode`
   Either `responses` or `chat-completions`
 - `auth`

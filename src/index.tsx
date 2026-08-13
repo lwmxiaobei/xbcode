@@ -30,6 +30,7 @@ import {
   loadSettings,
   needsModelSelection,
   normalizeModelEntry,
+  normalizeReasoningEffort,
   reloadSettings,
   resolveConfig,
   resolveProviderAuthState,
@@ -96,6 +97,7 @@ function createAgentConfig(resolved: ResolvedConfig, authState?: ProviderAuthSta
       mcpInstructions: getMcpPromptInstructions(),
     }),
     showThinking: resolved.showThinking,
+    reasoningEffort: resolved.reasoningEffort,
     apiMode: resolved.apiMode,
     supportsPreviousResponseId,
   };
@@ -251,6 +253,7 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/inbox", description: "drain lead inbox" },
   { command: "/provider", description: "switch provider" },
   { command: "/model", description: "switch model within current provider" },
+  { command: "/effort", description: "set reasoning effort (minimal/low/medium/high/xhigh/max)" },
   { command: "/compact", description: "compact conversation history to free context space" },
   { command: "/new", description: "clear context and start a new conversation" },
   { command: "/resume", description: "list recent saved sessions or restore one by id" },
@@ -820,6 +823,11 @@ function WelcomePanel({ width, messages }: { width: number; messages: UiMessage[
           ) : null}
           <Text> </Text>
           <Text color="gray" wrap="truncate">{currentResolved ? `${currentResolved.model} · ${currentResolved.apiMode}` : "No model selected"}</Text>
+          {currentResolved ? (
+            <Text color="gray" wrap="truncate">
+              effort {currentResolved.reasoningEffort ?? "default"}
+            </Text>
+          ) : null}
         </Box>
         <Box width={1}>
           <Text color="red">│</Text>
@@ -924,6 +932,7 @@ function helpMessage(): string {
     "inbox               drain lead inbox",
     "provider [name]     switch provider (no arg = list providers)",
     "model [name]        switch model within current provider",
+    "effort [level]      show or set reasoning effort (session only)",
     "compact             compact conversation history to free context space",
     "new                 clear context and start a new conversation",
     "resume [sessionId]  list recent sessions or restore one",
@@ -2336,6 +2345,31 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
         return;
       }
 
+      if (command.startsWith("effort")) {
+        const effortArg = command.slice(6).trim();
+        if (!currentResolved) {
+          pushMessage("error", "No model selected. Use /model to select one first.", "effort");
+          return;
+        }
+
+        if (!effortArg) {
+          const current = currentResolved.reasoningEffort ?? "(not set)";
+          pushMessage("system", `reasoningEffort = ${current}\nAvailable: minimal, low, medium, high, xhigh, max`, "effort");
+          return;
+        }
+
+        const effort = normalizeReasoningEffort(effortArg);
+        if (!effort) {
+          pushMessage("error", `Invalid effort "${effortArg}". Available: minimal, low, medium, high, xhigh, max`, "effort");
+          return;
+        }
+
+        currentResolved = { ...currentResolved, reasoningEffort: effort };
+        agentConfig = { ...agentConfig, reasoningEffort: effort };
+        pushMessage("system", `Switched reasoning effort to "${effort}" (session only).`, "effort");
+        return;
+      }
+
       if (command.startsWith("login")) {
         const providerArg = command.slice(5).trim() || currentResolved.providerName;
         const settings = loadSettings();
@@ -2829,7 +2863,7 @@ function CliApp({ startupResume }: { startupResume: StartupResumeState }) {
             ) : null}
             <Text color="white" wrap="truncate">{borderRule(innerWidth)}</Text>
             {userHasChosenModel && currentResolved
-              ? <Text color="gray">{currentResolved.providerName}: {currentResolved.model} | api: {currentResolved.apiMode} | attachments: {pendingAttachments.length} | {ellipsize(getEffectiveBaseURL(currentResolved, currentAuthState), 32)}</Text>
+              ? <Text color="gray">{currentResolved.providerName}: {currentResolved.model} | api: {currentResolved.apiMode} | effort: {currentResolved.reasoningEffort ?? "default"} | attachments: {pendingAttachments.length} | {ellipsize(getEffectiveBaseURL(currentResolved, currentAuthState), 32)}</Text>
               : <Text color="red">No model selected. Use /model to select one.</Text>}
           </Box>
         </>

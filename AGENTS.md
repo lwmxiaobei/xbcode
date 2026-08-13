@@ -37,6 +37,7 @@ Configure in `.env` at project root:
 - `OPENAI_BASE_URL` — optional, for compatible endpoints
 - `OPENAI_API_MODE` — `responses` or `chat-completions` (auto-detected)
 - `SHOW_THINKING=1` — display model reasoning
+- `REASONING_EFFORT` — thinking intensity for reasoning models (`minimal` / `low` / `medium` / `high` / `xhigh` / `max`)
 
 ## Key Conventions
 

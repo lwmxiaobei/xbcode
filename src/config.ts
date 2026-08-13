@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 
 import type { McpServerConfig } from "./mcp/types.js";
+import type { ReasoningEffort } from "./types.js";
 import { isPlainRecord } from "./utils.js";
 
 export type ModelEntry = {
@@ -28,6 +29,7 @@ export type Settings = {
   defaultProvider?: string;
   defaultModel?: string;
   showThinking?: boolean;
+  reasoningEffort?: ReasoningEffort;
   mcp?: {
     servers: McpServerConfig[];
   };
@@ -39,6 +41,7 @@ export type ResolvedConfig = {
   baseURL: string;
   apiMode: "responses" | "chat-completions";
   showThinking: boolean;
+  reasoningEffort?: ReasoningEffort;
   providerName: string;
   availableModels: string[];
 };
@@ -250,6 +253,16 @@ export async function clearProviderCredentials(filePath: string, providerName: s
   await writeCredentialsFile(filePath, { providers: nextProviders });
 }
 
+const REASONING_EFFORTS = new Set<ReasoningEffort>(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+export function normalizeReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const effort = value.trim().toLowerCase();
+  return REASONING_EFFORTS.has(effort as ReasoningEffort) ? (effort as ReasoningEffort) : undefined;
+}
+
 export function resolveApiMode(
   baseURL: string,
   explicit?: string,
@@ -307,6 +320,7 @@ export function resolveConfig(providerName?: string, modelName?: string): Resolv
   const baseURL = provider?.baseURL ?? "https://api.openai.com/v1";
   const apiMode = resolveApiMode(baseURL, provider?.apiMode, model);
   const showThinking = settings.showThinking ?? false;
+  const reasoningEffort = normalizeReasoningEffort(process.env.REASONING_EFFORT) ?? settings.reasoningEffort;
 
   return {
     model,
@@ -314,6 +328,7 @@ export function resolveConfig(providerName?: string, modelName?: string): Resolv
     baseURL,
     apiMode,
     showThinking,
+    reasoningEffort,
     providerName: targetProvider,
     availableModels,
   };
@@ -708,11 +723,17 @@ export function normalizeSettings(raw: unknown, warnings: string[]): Settings {
         .filter((value): value is McpServerConfig => value !== null)
     : [];
 
+  const reasoningEffort = normalizeReasoningEffort(root.reasoningEffort);
+  if (root.reasoningEffort !== undefined && !reasoningEffort) {
+    warnings.push('[config] reasoningEffort must be one of "minimal", "low", "medium", "high", "xhigh", "max".');
+  }
+
   return {
     providers,
     defaultProvider: typeof root.defaultProvider === "string" ? root.defaultProvider : undefined,
     defaultModel: typeof root.defaultModel === "string" ? root.defaultModel : undefined,
     showThinking: typeof root.showThinking === "boolean" ? root.showThinking : undefined,
+    reasoningEffort,
     mcp: { servers },
   };
 }

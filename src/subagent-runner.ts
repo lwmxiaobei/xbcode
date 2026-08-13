@@ -26,6 +26,7 @@ import { streamChatCompletion, streamResponse } from "./agent/streams.js";
 import { executeToolCall, runToolCall } from "./agent/tool-call.js";
 import type {
   ChatMessage,
+  ReasoningEffort,
   ResponseInputItem,
   ToolApprovalDecision,
   UiBridge,
@@ -127,6 +128,7 @@ async function subAgentLoopResponses(
   bridge: UiBridge,
   definition: SubagentDefinition,
   supportsPreviousResponseId: boolean,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<string> {
   const runtime = buildSubagentRuntime(definition, { apiMode: "responses", baseURL });
   const replayHistory: ResponseInputItem[] = [
@@ -138,7 +140,7 @@ async function subAgentLoopResponses(
 
   const caller = `subagent:${definition.name}`;
   for (let round = 0; round < definition.maxRounds; round += 1) {
-    const response = await streamResponse(client, model, system, false, nextInput, currentResponseId, bridge, runtime.responseTools, undefined, undefined, caller);
+    const response = await streamResponse(client, model, system, false, nextInput, currentResponseId, bridge, runtime.responseTools, undefined, undefined, caller, reasoningEffort);
     currentResponseId = response.id;
     replayHistory.push(...collectReplayableResponseOutput(response.output));
 
@@ -192,6 +194,7 @@ async function subAgentLoopChatCompletions(
   description: string,
   bridge: UiBridge,
   definition: SubagentDefinition,
+  reasoningEffort?: ReasoningEffort,
 ): Promise<string> {
   const runtime = buildSubagentRuntime(definition);
   const history: ChatMessage[] = [{ role: "user", content: description }];
@@ -199,7 +202,7 @@ async function subAgentLoopChatCompletions(
 
   const caller = `subagent:${definition.name}`;
   for (let round = 0; round < definition.maxRounds; round += 1) {
-    const message = await streamChatCompletion(client, model, system, history, bridge, runtime.chatTools, false, undefined, undefined, caller);
+    const message = await streamChatCompletion(client, model, system, history, bridge, runtime.chatTools, false, undefined, undefined, caller, reasoningEffort);
 
     const assistantText = extractAssistantText(message.content);
     if (assistantText.trim()) {
@@ -393,7 +396,7 @@ export async function runSubagentHeadless(): Promise<number> {
     const bridge = createJsonlBridge();
 
     const result = resolved.apiMode === "chat-completions"
-      ? await subAgentLoopChatCompletions(client, resolved.model, subSystem, spec.description, bridge, definition)
+      ? await subAgentLoopChatCompletions(client, resolved.model, subSystem, spec.description, bridge, definition, resolved.reasoningEffort)
       : await subAgentLoopResponses(
           client,
           resolved.model,
@@ -403,6 +406,7 @@ export async function runSubagentHeadless(): Promise<number> {
           bridge,
           definition,
           supportsPreviousResponseId,
+          resolved.reasoningEffort,
         );
 
     emit({ type: "result", text: result });

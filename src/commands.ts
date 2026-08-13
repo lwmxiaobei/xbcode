@@ -54,6 +54,7 @@ export function normalizeCommand(inputValue: string): string | null {
       return normalized;
     case "provider":
     case "model":
+    case "effort":
     case "login":
     case "logout":
       return normalized;

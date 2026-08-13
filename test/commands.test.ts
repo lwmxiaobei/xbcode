@@ -23,6 +23,11 @@ test("normalizeCommand recognizes /usage as a built-in command", () => {
   assert.equal(normalizeCommand("usage"), null);
 });
 
+test("normalizeCommand recognizes /effort and lowercases its argument", () => {
+  assert.equal(normalizeCommand("/effort"), "effort");
+  assert.equal(normalizeCommand("/EFFORT HIGH"), "effort high");
+});
+
 test("normalizeCommand preserves goal objective casing and spacing", () => {
   assert.equal(normalizeCommand("/goal Build OAuth API"), "goal Build OAuth API");
   assert.equal(normalizeCommand("/GOAL   Build OAuth API"), "goal Build OAuth API");

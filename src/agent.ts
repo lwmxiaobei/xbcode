@@ -15,7 +15,7 @@ import { createGoal, getGoal, updateGoalFromModel } from "./goal-manager.js";
 import { getSubagentDefinition } from "./subagents.js";
 import { dispatchSubagent } from "./subagent-runner.js";
 import type { TeammateRuntimeControl } from "./teammate-manager.js";
-import type { ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ToolApprovalDecision, UserChoiceQuestion } from "./types.js";
+import type { ResponseInputItem, ChatMessage, AgentState, UiBridge, TokenUsage, ImageAttachment, ReasoningEffort, ToolApprovalDecision, UserChoiceQuestion } from "./types.js";
 import { ResponseStreamError, TurnInterruptedError, throwIfAborted } from "./agent/interrupt.js";
 import { buildAssistantResponseMessage, buildChatUserMessageContent, buildCompactedResponsesQuery, buildInterruptedResponsesContext, buildResponseContinuation, buildUserResponseMessage, cloneResponseReplayItem, collectReplayableResponseOutput, extractAssistantText, repairInterruptedToolCallHistory, shouldPreserveChatReasoningContent } from "./agent/messages.js";
 import type { PreparedToolRuntime, RunControl, ToolHandlerMap } from "./agent/runtime-types.js";
@@ -398,6 +398,7 @@ async function agentLoop(
         control,
         onUsage,
         caller,
+        config.reasoningEffort,
       );
     } catch (error) {
       if (error instanceof ResponseStreamError) {
@@ -507,6 +508,7 @@ async function agentLoopWithChatCompletions(
         control,
         onUsage,
         caller,
+        config.reasoningEffort,
       );
     } catch (error) {
       if (error instanceof TurnInterruptedError && error.partialAssistantText) {
@@ -715,6 +717,7 @@ export type AgentConfig = {
   modelName: string;
   system: string;
   showThinking: boolean;
+  reasoningEffort?: ReasoningEffort;
   apiMode: "responses" | "chat-completions";
   supportsPreviousResponseId: boolean;
 };
